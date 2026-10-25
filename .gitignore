@@ -4,3 +4,5 @@ dist
 !.env.example
 *.tsbuildinfo
 design-reference
+
+.render-cache/

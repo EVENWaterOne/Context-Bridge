@@ -29,21 +29,28 @@ export function buildSuggestion({ task, round }: AgentContext): Suggestion {
   const fileName = file?.name ?? 'motion.py';
   let parameter = 'return_duration', before = '0.6', after = '1.2', unit = 's';
   let title = 'Slow down the return.', summary = 'Same target angle. A gentler return.', rationale = 'The return duration is short relative to the requested motion. Giving the same path more time reduces the abrupt acceleration without changing the target angle.';
-  const issue = o.issue;
+  const issue = (['Error message', 'No motion', 'Wrong way', 'Shaking', 'Too fast', 'Other'] as const).find(value => o.issues.includes(value));
   if (issue === 'No motion') { parameter = 'servo_enabled'; before = 'False'; after = 'True'; unit = ''; title = 'Enable the motion output.'; summary = `Restore the command path to ${o.joint}.`; rationale = 'This example checks the output-enable flag before changing movement parameters. In a real session BIT would validate the controller trace and wiring first.'; }
   if (issue === 'Wrong way') { parameter = 'servo_direction'; before = '1'; after = '-1'; unit = ''; title = 'Correct the return direction.'; summary = `Reverse ${o.joint} direction, keeping the travel limits.`; rationale = 'The example mapping inverts the servo direction. Keep the existing angle limits and start with a short test to confirm the physical direction.'; }
   if (issue === 'Shaking') { parameter = 'step_interval'; before = '0.02'; after = '0.04'; unit = 's'; title = 'Give each step room to settle.'; summary = 'Space the commands for a steadier movement.'; rationale = 'In this example, back-to-back updates make the joint chase its target. Increasing the interval reduces command frequency while preserving the target.'; }
   if (issue === 'Error message') { parameter = 'serial_timeout'; before = '0.1'; after = '1.0'; unit = 's'; title = 'Allow time for the controller reply.'; summary = 'Wait for the acknowledgement before the next command.'; rationale = 'The sample log models a timeout. A longer acknowledgement window can prevent a valid reply from being treated as missing. Verify the actual error before applying to hardware.'; }
   if (issue === 'Other') { parameter = 'return_duration'; title = 'Try one controlled change.'; summary = 'Keep the geometry; slow the next test.'; rationale = 'Your observation needs a small, reversible experiment. This demo proposes a slower motion and keeps the target and joint limits unchanged.'; }
+  if (o.issues.length > 1) rationale += ` You reported ${o.issues.join(', ').toLowerCase()}. This first experiment focuses on ${issue?.toLowerCase()}; the other observations remain in the request for the next check.`;
   const existing = file?.content.match(new RegExp(`^${parameter}\\s*=\\s*([^\\n#]+)`, 'm'))?.[1]?.trim();
   if (existing) before = existing;
   if (parameter === 'return_duration' && Number.isFinite(Number(before))) after = (Math.min(Number(before) * 2, 4)).toFixed(1);
+  if (parameter === 'step_interval' && Number.isFinite(Number(before))) after = Math.min(Math.max(Number(before) * 2, .04), .2).toFixed(2);
+  if (parameter === 'serial_timeout' && Number.isFinite(Number(before))) after = Math.min(Math.max(Number(before) * 2, 1), 5).toFixed(1);
+  if (parameter === 'servo_direction' && (before === '1' || before === '-1')) after = before === '1' ? '-1' : '1';
+  if (before === after || (Number.isFinite(Number(before)) && Number(before) === Number(after))) {
+    throw new Error('This example parameter is already at its suggested setting. Revise the observation or add new evidence before trying another change.');
+  }
   const completed = task.rounds.filter(r => r.completedAt);
-  return { id: `suggestion-${round.id}`, title, summary, rationale, parameter, before, after, unit, fileName, codeBefore: `${parameter} = ${before}`, codeAfter: `${parameter} = ${after}`, confidence: 'Example recommendation', evidence: [`${o.joint} · ${o.phase.toLowerCase()} · ${issue ?? 'observation'}`, `${fileName} · ${parameter}`, ...(o.includePrevious && completed.length ? [`Round ${completed.at(-1)!.number} · ${completed.at(-1)!.result}`] : [])], steps: ['Review the parameter and explanation.', 'Apply the change to this task’s local code.', 'Run the simulated test, then record what changed.'], risk: 'Simulation only. A real hardware connection must verify limits and require a separate test approval.' };
+  return { id: `suggestion-${round.id}`, title, summary, rationale, parameter, before, after, unit, fileName, codeBefore: `${parameter} = ${before}`, codeAfter: `${parameter} = ${after}`, confidence: 'Example recommendation', evidence: [`${o.joint} · ${o.phase.toLowerCase()} · ${o.issues.join(' + ') || 'observation'}`, `${fileName} · ${parameter}`, ...(o.includePrevious && completed.length ? [`Round ${completed.at(-1)!.number} · ${completed.at(-1)!.result}`] : [])], steps: ['Review the parameter and explanation.', 'Apply the change to this task’s local code.', 'Run the simulated test, then record what changed.'], risk: 'Simulation only. A real hardware connection must verify limits and require a separate test approval.' };
 }
 export const mockAgent: AgentAdapter = {
   async investigate(context, options = {}) {
-    if (!context.round.observation.issue) throw new Error('Choose an observation before asking BIT.');
+    if (!context.round.observation.issues.length) throw new Error('Choose an observation before asking BIT.');
     await progress(['Opening the context folder', 'Checking hardware and motion code', 'Comparing the relevant rounds', 'Preparing one focused change'], options, 9600);
     return buildSuggestion(context);
   },

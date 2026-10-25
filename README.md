@@ -25,7 +25,11 @@ npm run dev
 
 Palette and layout follow Figma page `04 · BIT / Light Industrial`: #F3F3EF, neutral matte surfaces, yellow human actions, four-color AI accents. Brand and feedback assets are exported directly from the current Figma components.
 
-All BIT routes share the same corrected robot body, upper-right band gap, hollow base rings, materials, and articulated rig. The robot uses layered high-resolution render assets with joint transforms and inverse kinematics. Inspection sweeps a transparent lens; construction reaches, grips, lifts, carries, lowers, and releases a block. These are 2.5D articulated renders, not a freely orbitable WebGL mesh. Reduced motion and hidden-tab behavior are supported.
+All BIT routes share the same corrected robot body, upper-right band gap, hollow base rings, materials, and articulated rig. The robot is a shared Three.js solid model with bevelled geometry, matte grey materials, an acrylic light band, neutral studio lighting, and a continuous inverse-kinematics rig. Inspection moves a transparent lens across evidence; construction reaches, grips, lifts, carries, lowers, and releases a block. Browsers without WebGL play a rendered video of the identical geometry and animation. Reduced motion and hidden-tab behavior are supported. The arm preview is illustrative, not a hardware-specific digital twin.
+
+Observation keys support multiple selections, including 1–6 keyboard toggles. Legacy single-choice workspace data is migrated without losing tasks or history. Ask BIT opens a non-modal panel at the right edge, leaving the workbench interactive. Progress markers use one SVG hexagon with a black face and a step number, with no overlaid square.
+
+Optional offline asset generation: `node --experimental-strip-types scripts/export-robot-scenes.mjs`, then run `scripts/render-robot-fallback.py` in a Python 3.11 environment with `bpy==4.3.0` and `numpy<2`. These tools are not required for the web build; fallback assets are included.
 
 ## Agent integration boundary
 
@@ -40,6 +44,6 @@ Request body: `{ version: 1, task, round }`. Keep all provider API keys on the s
 
 Framework: Vite. Install: `npm ci`. Build: `npm run build`. Output: `dist`.
 
-If importing the dedicated `context-bridge-v1` branch of the `daily-focus` repository, set **Root Directory** to `context-bridge` and choose that branch. The original repository root is unrelated and preserved.
+Import the dedicated `ruizewang875-glitch/Context-Bridge` repository and select its `main` branch. Keep **Root Directory** at the repository root (`./`). The included `vercel.json` configures the Vite build and single-page application routing.
 
 Design source: the project's approved Light Industrial design.

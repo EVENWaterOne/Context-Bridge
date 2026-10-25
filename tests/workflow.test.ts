@@ -5,7 +5,7 @@ import { buildSuggestion, mockAgent, createHttpAgent } from '../src/lib/agent.ts
 import type { Workspace, StorageLike } from '../src/lib/workflow.ts';
 function observed(): Workspace {
   let state = createInitialWorkspace();
-  state = updateRound(state, { observation: { ...getActiveRound(state).observation, issue: 'Too fast', detail: 'The elbow snaps back.' } });
+  state = updateRound(state, { observation: { ...getActiveRound(state).observation, issues: ['Too fast'], detail: 'The elbow snaps back.' } });
   const suggestion = buildSuggestion({ task: getActiveTask(state), round: getActiveRound(state) });
   return updateRound(state, { suggestion });
 }
@@ -18,7 +18,7 @@ test('feedback creates a new observation round without returning to hardware set
   state = { ...applyRoundChange(state), stage: 'feedback' };
   state = completeRound(state, 'Better', 'A smoother return.');
   assert.equal(state.stage, 'observe'); assert.equal(state.activeTaskId, taskId);
-  assert.equal(getActiveRound(state).number, 8); assert.equal(getActiveRound(state).observation.issue, null);
+  assert.equal(getActiveRound(state).number, 8); assert.deepEqual(getActiveRound(state).observation.issues, []);
   const completed = getActiveTask(state).rounds.find(r => r.id === old.id)!;
   assert.equal(completed.result, 'Better'); assert.equal(completed.note, 'A smoother return.'); assert.ok(completed.completedAt);
 });
@@ -66,12 +66,12 @@ test('storage quota failures are visible and do not throw away memory state', ()
 });
 test('mock suggestion uses the chosen issue, joint, files, and optional history', () => {
   let state = observed();
-  state = updateRound(state, { observation: { ...getActiveRound(state).observation, issue: 'Wrong way', joint: 'J3', includePrevious: false } });
+  state = updateRound(state, { observation: { ...getActiveRound(state).observation, issues: ['Wrong way'], joint: 'J3', includePrevious: false } });
   const suggestion = buildSuggestion({ task: getActiveTask(state), round: getActiveRound(state) });
   assert.equal(suggestion.parameter, 'servo_direction'); assert.equal(suggestion.after, '-1');
   assert.match(suggestion.summary, /J3/); assert.equal(suggestion.evidence.length, 2);
   state = updateTask(state, { files: [makeFile('tail.py', 'return_duration = 1.2\n', 'code')] });
-  state = updateRound(state, { observation: { ...getActiveRound(state).observation, issue: 'Too fast' } });
+  state = updateRound(state, { observation: { ...getActiveRound(state).observation, issues: ['Too fast'] } });
   const second = buildSuggestion({ task: getActiveTask(state), round: getActiveRound(state) });
   assert.equal(second.fileName, 'tail.py'); assert.equal(second.before, '1.2'); assert.equal(second.after, '2.4');
 });
@@ -97,10 +97,10 @@ test('applied rounds cannot silently be rewritten through backward navigation', 
   const state = applyRoundChange(observed());
   assert.equal(setStage(state, 'observe').stage, 'feedback');
   assert.equal(setStage(state, 'request').stage, 'feedback');
-  assert.equal(reviseObservation(state, { issue: 'Wrong way' }), state);
-  const editable = observed(), revised = reviseObservation(editable, { issue: 'Wrong way' });
+  assert.equal(reviseObservation(state, { issues: ['Wrong way'] }), state);
+  const editable = observed(), revised = reviseObservation(editable, { issues: ['Wrong way'] });
   assert.equal(getActiveRound(revised).suggestion, undefined);
-  assert.equal(getActiveRound(revised).observation.issue, 'Wrong way');
+  assert.deepEqual(getActiveRound(revised).observation.issues, ['Wrong way']);
 });
 test('file import replaces duplicate names and remains bound to its original task', async () => {
   const { upsertFiles } = await import('../src/lib/workflow.ts');
@@ -123,4 +123,47 @@ test('configured hardware is only reopened by an explicit task switch', async ()
   assert.equal(setStage(state, 'setup').stage, 'observe');
   assert.equal(switchTask(state, state.activeTaskId).stage, 'setup');
   assert.equal(createTask(state, 'Next build').stage, 'setup');
+});
+
+test('multiple observations toggle independently and survive save/reload', async () => {
+  const { toggleIssue } = await import('../src/lib/workflow.ts');
+  let state = createInitialWorkspace();
+  state = toggleIssue(toggleIssue(state, 'Too fast'), 'Shaking');
+  assert.deepEqual(getActiveRound(state).observation.issues, ['Too fast', 'Shaking']);
+  const storage = memory(); saveWorkspace(state, storage);
+  state = loadWorkspace(storage);
+  assert.deepEqual(getActiveRound(state).observation.issues, ['Too fast', 'Shaking']);
+  const suggestion = buildSuggestion({task:getActiveTask(state),round:getActiveRound(state)});
+  assert.match(suggestion.evidence[0], /Too fast \+ Shaking/);
+  assert.match(suggestion.rationale, /other observations remain/);
+  state = toggleIssue(state, 'Too fast');
+  assert.deepEqual(getActiveRound(state).observation.issues, ['Shaking']);
+  state = toggleIssue(state, 'Shaking');
+  await assert.rejects(mockAgent.investigate({task:getActiveTask(state),round:getActiveRound(state)},{durationMs:0}), /Choose an observation/);
+});
+
+test('upgrading a legacy single-choice workspace preserves task, history and files', () => {
+  const state = observed();
+  const legacy = JSON.parse(JSON.stringify(state));
+  for (const task of legacy.tasks) for (const round of task.rounds) {
+    round.observation.issue = round.observation.issues[0] || null;
+    delete round.observation.issues;
+  }
+  const restored = loadWorkspace(memory(JSON.stringify(legacy)));
+  assert.deepEqual(restored, state);
+});
+
+test('a later round uses the current parameter and never proposes an unchanged value', () => {
+  const state = observed(), task = getActiveTask(state), round = getActiveRound(state);
+  const code = task.files.find(file => file.kind === 'code')!;
+  round.observation.issues = ['Shaking'];
+  code.content = 'step_interval = 0.04\n';
+  const suggestion = buildSuggestion({ task, round });
+  assert.equal(suggestion.before, '0.04');
+  assert.equal(suggestion.after, '0.08');
+  code.content = 'step_interval = 0.20\n';
+  assert.throws(() => buildSuggestion({ task, round }), /already at its suggested setting/);
+  round.observation.issues = ['Wrong way'];
+  code.content = 'servo_direction = -1\n';
+  assert.equal(buildSuggestion({ task, round }).after, '1');
 });

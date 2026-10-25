@@ -6,7 +6,7 @@ export type Joint = 'J1' | 'J2' | 'J3';
 export type Phase = 'Home' | 'Reach' | 'Pause' | 'Return';
 export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean }
 export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string }
-export interface Observation { joint: Joint; issue: Issue | null; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
+export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
 export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string }
 export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string }
 export interface Task { id: string; name: string; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string }
@@ -18,7 +18,7 @@ export const FEEDBACK_OPTIONS: Feedback[] = ['Better', 'Same', 'Worse', 'Not sur
 export const STAGES: Stage[] = ['setup', 'first-run', 'observe', 'request', 'investigating', 'review', 'applying', 'test', 'feedback'];
 const now = () => new Date().toISOString();
 const id = (prefix: string) => `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
-export const emptyObservation = (): Observation => ({ joint: 'J2', issue: null, phase: 'Return', detail: '', desired: ['Slower return'], includePrevious: true });
+export const emptyObservation = (): Observation => ({ joint: 'J2', issues: [], phase: 'Return', detail: '', desired: ['Slower return'], includePrevious: true });
 export function newRound(number: number): Round { return { id: id('round'), number, observation: emptyObservation(), applied: false, createdAt: now() }; }
 export function makeFile(name: string, content: string, kind: ProjectFile['kind'] = 'other', source: ProjectFile['source'] = 'uploaded'): ProjectFile {
   return { id: id('file'), name, content, kind, source, size: new TextEncoder().encode(content).length, updatedAt: now() };
@@ -34,7 +34,7 @@ export function createInitialWorkspace(): Workspace {
   const createdAt = '2026-10-25T08:00:00.000Z';
   const history: Round = {
     id: 'arm-round-6', number: 6, createdAt, completedAt: '2026-10-25T08:12:00.000Z', applied: true, result: 'Better', note: 'The reach is stable. Return still feels abrupt.',
-    observation: { joint: 'J2', issue: 'Shaking', phase: 'Reach', detail: 'The elbow jitters near the end of reach.', desired: ['Smoother motion'], includePrevious: false },
+    observation: { joint: 'J2', issues: ['Shaking'], phase: 'Reach', detail: 'The elbow jitters near the end of reach.', desired: ['Smoother motion'], includePrevious: false },
     suggestion: { id: 'suggestion-history-arm', title: 'Ease into the target.', summary: 'Use eased interpolation at the end of reach.', rationale: 'A linear step gives the elbow a sudden stop. An ease-out curve reduces that discontinuity.', parameter: 'reach_easing', before: 'linear', after: 'ease_out', unit: '', fileName: 'motion.py', codeBefore: 'reach_easing = "linear"', codeAfter: 'reach_easing = "ease_out"', confidence: 'Example recommendation', evidence: ['Run 06 · reach oscillation', 'motion.py · interpolation'], steps: ['Change the easing curve.', 'Keep target angles unchanged.', 'Test the reach.'], risk: 'Check clearance before testing.' },
   };
   const active: Round = { id: 'arm-round-7', number: 7, observation: emptyObservation(), applied: false, createdAt };
@@ -49,7 +49,7 @@ export function createInitialWorkspace(): Workspace {
   };
   const petHistory: Round = {
     id: 'pet-round-1', number: 1, createdAt, completedAt: '2026-10-24T11:40:00.000Z', applied: true, result: 'Same', note: 'Touch response works, but the tail still moves too abruptly.',
-    observation: { joint: 'J1', issue: 'Too fast', phase: 'Return', detail: 'Tail snaps to neutral after a greeting.', desired: ['Smoother motion'], includePrevious: false },
+    observation: { joint: 'J1', issues: ['Too fast'], phase: 'Return', detail: 'Tail snaps to neutral after a greeting.', desired: ['Smoother motion'], includePrevious: false },
     suggestion: { ...history.suggestion!, id: 'suggestion-history-pet', title: 'Slow the tail return.', parameter: 'return_duration', before: '0.3', after: '0.6', unit: 's', fileName: 'tail.py', codeBefore: 'return_duration = 0.3', codeAfter: 'return_duration = 0.6', summary: 'Give the tail more time to settle.', rationale: 'Longer interpolation reduces the sudden stop.', evidence: ['Tail greeting trace'], steps: ['Update the return duration.', 'Replay the greeting.'] },
   };
   const petActive: Round = { ...newRound(2), id: 'pet-round-2' };
@@ -82,6 +82,11 @@ export function reviseObservation(state: Workspace, patch: Partial<Observation>)
   const round = getActiveRound(state);
   if (round.applied || round.completedAt) return state;
   return updateRound(state, { observation: { ...round.observation, ...patch }, suggestion: undefined });
+}
+/** Toggle against the latest state so rapid clicks and shortcuts never lose a selection. */
+export function toggleIssue(state: Workspace, issue: Issue): Workspace {
+  const issues = getActiveRound(state).observation.issues;
+  return reviseObservation(state, { issues: issues.includes(issue) ? issues.filter(value => value !== issue) : [...issues, issue] });
 }
 /** Imports are task-bound and deterministic: one current file per filename. */
 export function upsertFiles(state: Workspace, incoming: ProjectFile[], taskId = state.activeTaskId): Workspace {
@@ -136,7 +141,7 @@ function isValidWorkspace(value: unknown): value is Workspace {
     if (task.files.some((f: unknown) => !isObject(f) || typeof f.id !== 'string' || typeof f.name !== 'string' || typeof f.content !== 'string')) return false;
     for (const round of task.rounds) {
       if (!isObject(round) || typeof round.id !== 'string' || typeof round.number !== 'number' || !isObject(round.observation) || !Array.isArray(round.observation.desired) || typeof round.observation.detail !== 'string' || typeof round.applied !== 'boolean') return false;
-      if (round.observation.issue !== null && !ISSUES.includes(round.observation.issue as Issue)) return false;
+      if (!Array.isArray(round.observation.issues) || round.observation.issues.some(issue => !ISSUES.includes(issue as Issue))) return false;
     }
     if (!task.rounds.some((r: Round) => r.id === task.activeRoundId)) return false;
   }
@@ -146,7 +151,19 @@ function browserStorage(): StorageLike | undefined { try { return typeof window 
 export function loadWorkspace(storage = browserStorage()): Workspace {
   try {
     const raw = storage?.getItem(STORAGE_KEY); if (!raw) return createInitialWorkspace();
-    const value: unknown = JSON.parse(raw); if (!isValidWorkspace(value)) return createInitialWorkspace();
+    const value: unknown = JSON.parse(raw);
+    // Preserve existing v1 workspaces when upgrading single-choice observations.
+    if (isObject(value) && Array.isArray(value.tasks)) for (const task of value.tasks) {
+      if (isObject(task) && Array.isArray(task.rounds)) for (const round of task.rounds) {
+        if (!isObject(round) || !isObject(round.observation)) continue;
+        const observation = round.observation;
+        if (!Array.isArray(observation.issues) && (observation.issue === null || ISSUES.includes(observation.issue as Issue))) {
+          observation.issues = observation.issue ? [observation.issue] : [];
+          delete observation.issue;
+        }
+      }
+    }
+    if (!isValidWorkspace(value)) return createInitialWorkspace();
     // Work in flight is restartable; a refresh never pretends an interrupted operation completed.
     const stage = value.stage === 'investigating' ? 'request' : value.stage === 'applying' ? 'review' : value.stage;
     return { ...value, stage };
