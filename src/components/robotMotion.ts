@@ -33,13 +33,13 @@ export function motionPose(mode: MotionMode, seconds: number): Pose {
   if (mode === 'inspect') return { ...sampleKeys(inspectKeys, (seconds % 10) / 10), phase: 'Looking through your evidence' };
   if (mode === 'arm') return { ...sampleKeys(armKeys, (seconds % ARM_DURATION) / ARM_DURATION), phase: 'Reach · pause · return' };
   const t = (seconds % 9) / 9;
-  return { ...sampleKeys([[0, 1.6, 3.75, .5], [.25, 1.9, 4.0, 1], [.38, 1.7, 4.12, .3], [.50, 1.9, 4.0, 1], [.65, 1.65, 3.9, .5], [1, 1.6, 3.75, .5]], t), phase: 'Ready to build with you' };
+  return { ...sampleKeys([[0,-1.15,4.65,.72],[.25,-1.35,4.78,1],[.38,-1.18,4.91,.30],[.50,-1.35,4.78,1],[.65,-.95,4.58,.60],[1,-1.15,4.65,.72]], t), phase: 'Ready to build with you' };
 }
 /** A physical two-link chain: both links always share the same elbow pivot. */
-export function solveArm(x: number, y: number, upper: number, lower: number) {
+export function solveArm(x: number, y: number, upper: number, lower: number, bend: -1 | 1 = -1) {
   const d = Math.hypot(x, y), distance = Math.max(Math.abs(upper - lower) + .001, Math.min(upper + lower - .001, d));
   const direction = Math.atan2(y, x);
-  const elbow = -Math.acos(Math.max(-1, Math.min(1, (distance * distance - upper * upper - lower * lower) / (2 * upper * lower))));
+  const elbow = bend * Math.acos(Math.max(-1, Math.min(1, (distance * distance - upper * upper - lower * lower) / (2 * upper * lower))));
   const shoulder = direction - Math.atan2(lower * Math.sin(elbow), upper + lower * Math.cos(elbow));
   return { shoulder, elbow, x: Math.cos(direction) * distance, y: Math.sin(direction) * distance };
 }
