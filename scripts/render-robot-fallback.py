@@ -41,6 +41,7 @@ for key,m in source['materials'].items():
  p.inputs['Roughness'].default_value=m['roughness'];p.inputs['Metallic'].default_value=m['metalness']
  p.inputs['Transmission Weight'].default_value=m['transmission'];p.inputs['IOR'].default_value=1.46
  p.inputs['Coat Weight'].default_value=m['clearcoat'];p.inputs['Coat Roughness'].default_value=.32
+ p.inputs['Specular IOR Level'].default_value=.5*m.get('specularIntensity',1)
  p.inputs['Emission Color'].default_value=(*m['emissive'],1);p.inputs['Emission Strength'].default_value=m['intensity']
  if m['vertexColors']:
   c=mat.node_tree.nodes.new('ShaderNodeVertexColor');c.layer_name='Col'

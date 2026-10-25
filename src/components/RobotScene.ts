@@ -4,10 +4,13 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { BUILD_DURATION, motionPose, smooth, solveArm, type MotionMode } from './robotMotion.ts';
 
-export interface RobotScene { render(seconds: number, activeJoint: string): void; dispose(): void; phase: string }
+export interface JointAnchor { x: number; y: number }
+export interface RobotScene { render(seconds: number, activeJoint: string): void; dispose(): void; phase: string; jointAnchors: JointAnchor[] }
 type Material = THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
-const palette = ['#9c28ff', '#00dbef', '#ffe000', '#ff5e12'];
+const palette = ['#a349f4', '#00bfd1', '#f1c82d', '#ff7138'];
 const hex = [[.7, 1.05], [-.7, 1.05], [-1.36, 0], [-.7, -1.05], [.7, -1.05], [1.36, 0]];
+const bandOutline = [[.65,1],[-.65,1],[-1.25,0],[-.65,-1],[.65,-1],[1.25,0]];
+const bandCorner = .14;
 
 function roundedPolygon(points: number[][], radius = .14) {
   const path = new THREE.Shape();
@@ -39,9 +42,19 @@ function ringGeometry(outer: number, inner: number, height: number) {
   const path = roundedPolygon([[inner,-height/2],[outer,-height/2],[outer,height/2],[inner,height/2]], Math.min(.055,height*.3));
   return new THREE.LatheGeometry(path.getPoints(10), 96);
 }
+/** The face follows the diffuser's actual inner contour, including its corner arcs. */
+function faceShape(inset: number) {
+  const centerline = roundedPolygon(bandOutline, bandCorner), shape = new THREE.Shape();
+  for (let i = 0; i < 480; i++) {
+    const t = i / 480, p = centerline.getPointAt(t), tangent = centerline.getTangentAt(t);
+    const x = p.x - tangent.y * inset, y = p.y + tangent.x * inset;
+    if (i === 0) shape.moveTo(x,y); else shape.lineTo(x,y);
+  }
+  shape.closePath(); return shape;
+}
 function lightBand(points: THREE.Vector3[]) {
   const path = new THREE.CurvePath<THREE.Vector3>();
-  const corner = .14;
+  const corner = bandCorner;
   let previous = points[0];
   for (let i = 1; i < points.length - 1; i++) {
     const p = points[i], a = p.clone().add(points[i - 1].clone().sub(p).normalize().multiplyScalar(corner)), b = p.clone().add(points[i + 1].clone().sub(p).normalize().multiplyScalar(corner));
@@ -68,10 +81,19 @@ function lightBand(points: THREE.Vector3[]) {
   const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));geometry.setIndex(indices);geometry.computeVertexNormals();
   return geometry;
 }
-function bandColor(t: number) {
-  const stops = [0, .30, .66, .88, 1], colors = [palette[0], palette[1], palette[2], palette[3], palette[3]];
-  let i = 0; while (i < 3 && t > stops[i + 1]) i++;
-  return new THREE.Color(colors[i]).lerp(new THREE.Color(colors[i + 1]), smooth((t - stops[i]) / (stops[i + 1] - stops[i])));
+const bandStops = [
+  [0,palette[0]],[.16,palette[0]],[.235,'#6f8ded'],[.31,palette[1]],[.40,palette[1]],
+  [.455,'#10cfa8'],[.515,'#a9d85a'],[.58,palette[2]],[.66,palette[2]],
+  [.82,palette[3]],[1,palette[3]],
+] as const;
+export function bandColor(t: number) {
+  let i = 0; while (i < bandStops.length - 2 && t > bandStops[i + 1][0]) i++;
+  const [start,a] = bandStops[i], [end,b] = bandStops[i + 1], k = (1-Math.cos(Math.PI*THREE.MathUtils.clamp((t-start)/(end-start),0,1)))/2;
+  const from = new THREE.Color(a).getHSL({h:0,s:0,l:0},THREE.SRGBColorSpace);
+  const to = new THREE.Color(b).getHSL({h:0,s:0,l:0},THREE.SRGBColorSpace);
+  // Interpolate saturated hues, not complementary RGB light that becomes white.
+  const hueDelta = ((to.h - from.h + 1.5) % 1) - .5;
+  return new THREE.Color().setHSL(from.h + hueDelta * k,THREE.MathUtils.lerp(from.s,to.s,k),THREE.MathUtils.lerp(from.l,to.l,k),THREE.SRGBColorSpace);
 }
 
 /** Batch fixed castings inside each articulated part; pivots and movable props stay separate. */
@@ -189,20 +211,22 @@ export function createRobotModel(mode: MotionMode) {
     // The same bevelled solid shell is reused for home, searching, building and feedback.
     mesh(torso, extruded(hex.map(([x,y])=>[x*.98,y*.98]), .45, .115, .22), dark,0,0,-.065);
     mesh(torso, extruded(hex, .48, .13, .22), body,0,0,.025);
-    mesh(torso, extruded(hex.map(([x,y])=>[x*.79,y*.79]), .085, .055,.16), dark,0,0,.39);
-    mesh(torso, extruded(hex.map(([x,y])=>[x*.755,y*.755]), .055, .035,.16), black,0,0,.465);
+    mesh(torso, extrudeShape(faceShape(.06), .085, .012), dark,0,0,.50);
+    // A slight hidden overlap seats the face beneath the acrylic lip, without a gap.
+    const face=mesh(torso, extrudeShape(faceShape(.09), .08, .008), black,0,0,.585);
+    face.name='bit-face-panel';
     for (const side of [-1, 1]) {
       mesh(torso, box(.15,.48,.32,.06),dark,side*1.36,-.04,0);
       mesh(torso, box(.24,.59,.39,.10),body,side*1.46,-.04,.04);
       mesh(torso, box(.15,.47,.018,.065),body,side*1.46,-.04,.249);
       mesh(torso, box(.019,.29,.014,.008),dark,side*1.54,-.04,.25);
     }
-    const band=lightBand([[.83,.70,.585],[.65,1,.585],[-.65,1,.585],[-1.25,0,.585],[-.65,-1,.585],[.65,-1,.585],[1.25,0,.585],[1.07,.30,.585]].map(p=>new THREE.Vector3(...p)));
-    const acrylic=new THREE.MeshPhysicalMaterial({color:'#ffffff',vertexColors:true,roughness:.34,metalness:0,clearcoat:.15,clearcoatRoughness:.42,transmission:.04,thickness:.13,emissive:'#ffffff',emissiveIntensity:.58,toneMapped:false});
+    const band=lightBand([[.83,.70,.585],...bandOutline.map(([x,y])=>[x,y,.585]),[1.07,.30,.585]].map(p=>new THREE.Vector3(...p)));
+    const acrylic=new THREE.MeshPhysicalMaterial({color:'#ffffff',vertexColors:true,roughness:.40,metalness:0,clearcoat:.08,clearcoatRoughness:.46,specularIntensity:.24,envMapIntensity:.25,transmission:.015,thickness:.13,emissive:'#ffffff',emissiveIntensity:.38,toneMapped:false});
     // Vertex colour must tint emission as well as reflection; white emission washed out v1.
     acrylic.onBeforeCompile=shader=>{shader.fragmentShader=shader.fragmentShader.replace('#include <emissivemap_fragment>','#include <emissivemap_fragment>\n#ifdef USE_COLOR\n totalEmissiveRadiance *= vColor;\n#endif');};
-    acrylic.customProgramCacheKey=()=> 'bit-colored-acrylic-v2';
-    mesh(torso,band,acrylic);
+    acrylic.customProgramCacheKey=()=> 'bit-colored-acrylic-v3';
+    mesh(torso,band,acrylic).name='bit-light-band';
     for(const [t,x,y] of [[0,.83,.70],[1,1.07,.30]]) {
       const endMaterial=acrylic.clone();endMaterial.vertexColors=false;endMaterial.color.copy(bandColor(t));endMaterial.emissive.copy(bandColor(t));
       const end=mesh(torso,new THREE.SphereGeometry(.115,32,20),endMaterial,x,y,.585);end.scale.set(.35,1,.565);end.rotation.z=Math.atan2(.30,-.18);
@@ -212,7 +236,7 @@ export function createRobotModel(mode: MotionMode) {
     }
     const pixelMat = new THREE.MeshStandardMaterial({color:'#fff7de',emissive:'#fff0c9',emissiveIntensity:.8,roughness:.5,toneMapped:false});
     for (const x of [-.34, .34]) {
-      const eye = new THREE.Group(); eye.position.set(x, .01, .55); torso.add(eye); eyes.push(eye);
+      const eye = new THREE.Group(); eye.position.set(x, .01, .648); torso.add(eye); eyes.push(eye);
       for (let row = 0; row < 6; row++) for (let col = 0; col < 3; col++) mesh(eye, box(.052, .052, .012, .004), pixelMat, (col - 1) * .066, (row - 2.5) * .066);
     }
     [[.26,.16,.14,.30],[.42,.29,.17,.54],[.62,.45,.19,.80]].forEach(([outer,inner,height,y]) => { rings.push(mesh(actor, ringGeometry(outer, inner, height), body, 0, y, .25)); });
@@ -253,13 +277,15 @@ export function createRobotModel(mode: MotionMode) {
     camera.position.set(2.2,5.0,15); camera.lookAt(mode==='hero'?-.05:.6,2.5,0);
   }
   const setAspect = (aspect: number) => {
-    const half = mode === 'arm' ? 2.55 : 3.05;
+    // Keep the complete arm sweep in a square safe area, even in a narrow column.
+    const half = mode === 'arm' ? 2.75 / Math.min(1,aspect) : 3.05;
     camera.left = -half * aspect; camera.right = half * aspect; camera.top = half; camera.bottom = -half; camera.updateProjectionMatrix();
   };
   batchStaticParts(torso);
   setAspect(1);
   const state = {
     scene, camera, setAspect,
+    jointAnchors: [{x:0,y:0},{x:0,y:0},{x:0,y:0}],
     phase: '',
     update(seconds: number, activeJoint: string) {
       const pose = motionPose(mode, seconds); state.phase = pose.phase;
@@ -289,6 +315,10 @@ export function createRobotModel(mode: MotionMode) {
         }
       }
       scene.updateMatrixWorld(true); camera.updateMatrixWorld(true);
+      for (const [i,joint] of [rig.shoulder,rig.elbow,rig.wrist].entries()) {
+        const p=new THREE.Vector3(0,0,.34).applyMatrix4(joint.matrixWorld).project(camera);
+        state.jointAnchors[i].x=(p.x+1)/2;state.jointAnchors[i].y=(1-p.y)/2;
+      }
     },
     dispose() {
 
@@ -312,12 +342,14 @@ export function createRobotScene(host: HTMLElement, mode: MotionMode): RobotScen
   const environment = new RoomEnvironment(), pmrem = new THREE.PMREMGenerator(renderer), envMap = pmrem.fromScene(environment, .04);
   model.scene.environment = envMap.texture; model.scene.environmentIntensity = .6;
   environment.dispose(); pmrem.dispose();
-  const resize = () => { const width = Math.max(1, host.clientWidth), height = Math.max(1, host.clientHeight); model.setAspect(width / height); renderer.setSize(width, height, false); renderer.render(model.scene, model.camera); };
+  let currentSeconds=0,currentJoint='J2';
+  const resize = () => { const width = Math.max(1, host.clientWidth), height = Math.max(1, host.clientHeight); model.setAspect(width / height);model.update(currentSeconds,currentJoint); renderer.setSize(width, height, false); renderer.render(model.scene, model.camera); };
   const sizeObserver = new ResizeObserver(resize); sizeObserver.observe(host); resize();
   let disposed = false;
   return {
     get phase() { return model.phase; },
-    render(seconds, activeJoint) { if (disposed) return; model.update(seconds, activeJoint); renderer.render(model.scene, model.camera); },
+    get jointAnchors() { return model.jointAnchors; },
+    render(seconds, activeJoint) { if (disposed) return;currentSeconds=seconds;currentJoint=activeJoint; model.update(seconds, activeJoint); renderer.render(model.scene, model.camera); },
     dispose() { disposed = true; sizeObserver.disconnect(); model.dispose(); envMap.dispose(); renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove(); },
   };
 }

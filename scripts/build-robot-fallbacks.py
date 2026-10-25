@@ -10,7 +10,8 @@ sources=['src/components/RobotScene.ts','src/components/robotMotion.ts','scripts
 fingerprint=hashlib.sha256(b''.join(Path(p).read_bytes() for p in sources)).hexdigest()[:12]
 cache=Path('.render-cache')/fingerprint;cache.mkdir(parents=True,exist_ok=True)
 output=Path('public/assets/robot');output.mkdir(parents=True,exist_ok=True)
-environment={**os.environ,'ROBOT_RENDER_CACHE':str(cache),'ROBOT_RENDER_ENGINE':os.environ.get('ROBOT_RENDER_ENGINE','BLENDER_EEVEE_NEXT'),'LIBGL_ALWAYS_SOFTWARE':'1','EGL_PLATFORM':'surfaceless','LP_NUM_THREADS':'3'}
+threads=max(1,len(os.sched_getaffinity(0))//2) if hasattr(os,'sched_getaffinity') else 3
+environment={**os.environ,'ROBOT_RENDER_CACHE':str(cache),'ROBOT_RENDER_ENGINE':os.environ.get('ROBOT_RENDER_ENGINE','BLENDER_EEVEE_NEXT'),'LIBGL_ALWAYS_SOFTWARE':'1','EGL_PLATFORM':'surfaceless','LP_NUM_THREADS':str(threads),'ROBOT_RENDER_THREADS':str(threads)}
 subprocess.run(['node','--experimental-strip-types','scripts/export-robot-scenes.mjs'],env=environment,check=True)
 print(f'Render cache: {cache}',flush=True)
 slots=Queue()
@@ -31,4 +32,4 @@ def render(mode):
    temporary=output/(source.name+'.tmp');shutil.copyfile(source,temporary);temporary.replace(output/source.name)
   print(f'{mode}: video and poster ready',flush=True)
  finally:slots.put(slot)
-with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(render,['hero','arm','inspect','build']))
+with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(render,['arm','hero','inspect','build']))
