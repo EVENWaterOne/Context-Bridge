@@ -15,3 +15,4 @@
 
 @media(min-width:761px){.model-column>.bit-robot--arm{height:clamp(330px,48vh,460px);aspect-ratio:auto}}
 @media(min-width:1280px){.chat-is-open .work-main,.chat-is-open .work-footer{margin-right:400px}.chat-is-open .workflow-top{margin-right:410px}.chat-is-open .split-layout{gap:35px;grid-template-columns:1fr 1fr}.chat-is-open .controls-column h1{font-size:27px}.chat-is-open .work-main{padding-inline:4%}.chat-is-open .keycap{padding:13px;font-size:11px}.chat-is-open .file-shortcut{display:none}}
+.landing-robot .robot-name{margin-top:0;position:relative;z-index:1}
