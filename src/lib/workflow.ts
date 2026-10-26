@@ -1,11 +1,12 @@
-import { HARDWARE_PROFILE, hardwareDescription, pendingCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
+import { emptyAssembly, existingArmAssembly, assembledCount, assemblyReady, type HardwareAssembly } from './assembly.ts';
+import { HARDWARE_PROFILE, JOINT_IDS, JOINTS, hardwareDescription, pendingCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
 /** Browser-local prototype state. No passwords or external service credentials are persisted. */
 export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigating' | 'review' | 'applying' | 'test' | 'feedback';
 export type Issue = 'Too fast' | 'No motion' | 'Wrong way' | 'Shaking' | 'Error message' | 'Other';
 export type Feedback = 'Better' | 'Same' | 'Worse' | 'Not sure';
 export type Joint = HardwareJoint;
 export type Phase = 'Home' | 'Reach' | 'Pause' | 'Return';
-export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits }
+export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits; assembly?: HardwareAssembly }
 export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string }
 export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
 export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string }
@@ -41,7 +42,7 @@ export function createInitialWorkspace(): Workspace {
   const active: Round = { id: 'arm-round-7', number: 7, observation: emptyObservation(), applied: false, createdAt };
   const arm: Task = {
     id: 'task-desk-arm', name: 'Desktop arm · return motion', createdAt, activeRoundId: active.id,
-    hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, profile: HARDWARE_PROFILE, servoCalibration: pendingCalibration(), notes: 'J1 base · J2 shoulder · J3 forearm linkage · J4 gripper. No independent wrist axis. Servo calibration pending.', configured: false },
+    hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, profile: HARDWARE_PROFILE, servoCalibration: pendingCalibration(), assembly: existingArmAssembly(), notes: 'J1 base · J2 shoulder · J3 forearm linkage · J4 gripper. No independent wrist axis. Servo calibration pending.', configured: false },
     files: [
       makeFile('motion.py', '# Desktop arm · motion profile\nreach_easing = "ease_out"\nreturn_duration = 0.6\nservo_direction = 1\nstep_interval = 0.02\n\ndef return_home(arm):\n    # No fabricated servo angles: home comes from the calibrated controller.\n    arm.return_to_calibrated_home(duration=return_duration)\n', 'code', 'sample'),
       makeFile('hardware.json', JSON.stringify(hardwareDescription(), null, 2), 'hardware', 'sample'),
@@ -62,11 +63,29 @@ export function updateTask(state: Workspace, patch: Partial<Omit<Task, 'id'>>, t
   if (!state.tasks.some(t => t.id === taskId)) throw new Error('Task not found.');
   return { ...state, tasks: state.tasks.map(t => t.id === taskId ? { ...t, ...patch } : t) };
 }
-/** Keep the generated context description in step with the selected controller. */
+/** Context files follow confirmed parts; unvalidated input stays in the setup draft. */
+function hardwareContext(hardware:Hardware) {
+  const assembly=hardware.assembly??existingArmAssembly(),count=assembledCount(assembly);
+  return {...hardwareDescription(hardware.controller),connection:hardware.connection,
+    category:assembly.category,servoCount:count,armDOF:Math.min(3,count),gripperDOF:count===4?1:0,
+    servo:undefined,calibrationNote:'Entered servo limits are user-provided. Unmeasured channels remain null; preview poses are illustrative.',axes:Object.fromEntries(JOINT_IDS.slice(0,count).map(joint=>[joint,{...JOINTS[joint],...assembly.parts[joint]}])),
+    servoCalibration:hardware.servoCalibration??pendingCalibration(),configurationComplete:hardware.configured};
+}
 export function updateHardware(state: Workspace, patch: Partial<Hardware>): Workspace {
   const task=getActiveTask(state),hardware={...task.hardware,...patch};
-  const content=JSON.stringify({...hardwareDescription(hardware.controller),connection:hardware.connection,servoCalibration:hardware.servoCalibration??pendingCalibration()},null,2);
-  return updateTask(state,{hardware,files:task.files.map(file=>file.source==='sample'&&file.name==='hardware.json'?{...file,content,size:new TextEncoder().encode(content).length,updatedAt:now()}:file)});
+  if(hardware.assembly){const count=assembledCount(hardware.assembly);hardware.joints=Math.min(3,count);hardware.gripper=count===4;}
+  const content=JSON.stringify(hardwareContext(hardware),null,2);
+  return updateTask(state,{hardware,files:task.files.map(file=>file.source!=='uploaded'&&file.kind==='hardware'&&['hardware.json','context-bridge-hardware.json'].includes(file.name)?{...file,content,size:new TextEncoder().encode(content).length,updatedAt:now()}:file)});
+}
+export function completeHardwareSetup(state:Workspace):Workspace {
+  const task=getActiveTask(state),assembly=task.hardware.assembly??existingArmAssembly();
+  if(!task.name.trim()||!task.hardware.controller.trim()||!task.hardware.connection.trim()||!assemblyReady(assembly,task.hardware.servoCalibration??pendingCalibration()))throw new Error('Finish adding the four parts and choose a controller and connection.');
+  let next=updateHardware(state,{configured:true,profile:HARDWARE_PROFILE,assembly:{...assembly,step:5}});
+  const updated=getActiveTask(next);
+  if(!updated.files.some(file=>file.source!=='uploaded'&&file.kind==='hardware'&&['hardware.json','context-bridge-hardware.json'].includes(file.name))){
+    next=updateTask(next,{files:[...updated.files,makeFile('context-bridge-hardware.json',JSON.stringify(hardwareContext(updated.hardware),null,2),'hardware','generated')]});
+  }
+  return setStage(next,'first-run');
 }
 export function updateRound(state: Workspace, patch: Partial<Omit<Round, 'id' | 'number'>>, roundId = getActiveTask(state).activeRoundId): Workspace {
   const task = getActiveTask(state);
@@ -109,7 +128,7 @@ export function switchTask(state: Workspace, taskId: string): Workspace {
 export function createTask(state: Workspace, name: string): Workspace {
   const clean = name.trim(); if (!clean) throw new Error('Give your task a name.');
   const round = newRound(1);
-  const task: Task = { id: id('task'), name: clean.slice(0, 100), createdAt: now(), activeRoundId: round.id, hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, profile: HARDWARE_PROFILE, servoCalibration: pendingCalibration(), notes: 'Four SG90 actuators; mechanical wrist leveling; servo calibration pending.', configured: false }, files: [], rounds: [round] };
+  const task: Task = { id: id('task'), name: clean.slice(0, 100), createdAt: now(), activeRoundId: round.id, hardware: { name: 'Desktop robot arm', controller: '', connection: '', joints: 0, gripper: false, profile: HARDWARE_PROFILE, servoCalibration: pendingCalibration(), assembly: emptyAssembly(), notes: '', configured: false }, files: [], rounds: [round] };
   return { ...state, tasks: [...state.tasks, task], activeTaskId: task.id, stage: 'setup' };
 }
 export function completeRound(state: Workspace, result: Feedback, note = ''): Workspace {

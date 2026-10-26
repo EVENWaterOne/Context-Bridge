@@ -13,3 +13,5 @@
 @media(prefers-reduced-motion:reduce){.robot-joint{transition:none}}
 
 .robot-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;border-radius:12px}
+
+.robot-assembly-fallback{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}

@@ -22,7 +22,7 @@ animate='--animation' in sys.argv
 source=json.loads((cache/f'{mode}.json').read_text())
 bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
 scene=bpy.context.scene
-scene.render.engine=os.environ.get('ROBOT_RENDER_ENGINE','CYCLES');scene.cycles.device='CPU';scene.cycles.samples=8 if animate else 24
+scene.render.engine=os.environ.get('ROBOT_RENDER_ENGINE','CYCLES');scene.cycles.device='CPU';scene.cycles.samples=int(os.environ.get('ROBOT_RENDER_SAMPLES',8 if animate else 24))
 scene.eevee.taa_render_samples=int(os.environ.get('ROBOT_RENDER_SAMPLES',4 if animate else 40))
 scene.cycles.use_denoising=True;scene.cycles.max_bounces=3;scene.cycles.diffuse_bounces=1;scene.cycles.glossy_bounces=2;scene.cycles.transmission_bounces=4
 scene.render.resolution_x=(768 if mode=='hero' else 576) if animate else 768;scene.render.resolution_y=scene.render.resolution_x;scene.render.resolution_percentage=100

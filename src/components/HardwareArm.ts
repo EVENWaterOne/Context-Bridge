@@ -4,7 +4,8 @@ import { ARM_DIMENSIONS, hardwareMotion, linkagePose, type PlanarPoint } from '.
 import { JOINT_IDS } from '../lib/hardware.ts';
 
 /** The owner's four-SG90 linkage arm. BIT's decorative arm is a separate rig. */
-export function createHardwareArmModel() {
+export function createHardwareArmModel(assembledParts=4) {
+  let buildStage=1;
   const scene=new THREE.Scene();scene.background=new THREE.Color('#f3f3ef');
   const camera=new THREE.OrthographicCamera(-2.8,2.8,2.8,-2.8,.1,100);
   camera.position.set(4.4,4.7,10);camera.lookAt(.45,1.65,0);
@@ -21,7 +22,7 @@ export function createHardwareArmModel() {
   const turntable=new THREE.Group();turntable.name='hardware-base-yaw';assembly.add(turntable);
   const box=(x:number,y:number,z:number,r=.025)=>new RoundedBoxGeometry(x,y,z,3,Math.min(r,x/3,y/3,z/3));
   function mesh(parent:THREE.Object3D,geometry:THREE.BufferGeometry,material:THREE.Material,x=0,y=0,z=0) {
-    const object=new THREE.Mesh(geometry,material);object.position.set(x,y,z);parent.add(object);return object;
+    const object=new THREE.Mesh(geometry,material);object.userData.assemblyStage=buildStage;object.position.set(x,y,z);parent.add(object);return object;
   }
   function cylinder(parent:THREE.Object3D,r:number,depth:number,material:THREE.Material,x:number,y:number,z:number,axis:'y'|'z'='z') {
     const m=mesh(parent,new THREE.CylinderGeometry(r,r,depth,40),material,x,y,z);if(axis==='z')m.rotation.x=Math.PI/2;return m;
@@ -72,15 +73,20 @@ export function createHardwareArmModel() {
     return motor;
   }
   servo(assembly,1,0,.54,0,new THREE.Euler(-Math.PI/2,0,0));
+  buildStage=2;
   servo(turntable,2,0,ARM_DIMENSIONS.shoulderHeight,.30,new THREE.Euler(0,Math.PI,0));
+  buildStage=3;
   servo(turntable,3,0,ARM_DIMENSIONS.shoulderHeight,-.30,new THREE.Euler());
+  buildStage=2;
   for(const z of [-.31,.31])mesh(turntable,box(.35,.38,.105),body,0,.83,z);
   // Two independently driven arms share the shoulder's horizontal shaft axis.
   const d=ARM_DIMENSIONS;
   for(const z of [-.18,.18])rod(`hardware-upper-${z}`, 'A','B',d.upper,.24,z,body,true);
+  buildStage=3;
   rod('hardware-forearm', 'C','E',d.driveCrank+d.forearm,.21,-.04,body,true);
   rod('hardware-drive-crank', 'A','D',d.driveCrank,.17,-.43,side);
   rod('hardware-drive-rod', 'D','C',d.upper,.14,-.43);
+  buildStage=2;
   // A second, passive parallelogram carries the stationary reference to the elbow.
   mesh(turntable,capsule(d.referenceOffset,.17,.10),side,-d.referenceOffset,d.shoulderHeight,.40);
   rod('hardware-reference-rod','F','G',d.upper,.13,.40,side);
@@ -88,12 +94,14 @@ export function createHardwareArmModel() {
   const triangleShape=new THREE.Shape();triangleShape.moveTo(-d.referenceOffset-.065,-.04);triangleShape.lineTo(.07,-.08);triangleShape.lineTo(.07,d.toolBracket+.06);triangleShape.lineTo(-d.referenceOffset-.065,.06);triangleShape.closePath();
   const triangleGeometry=new THREE.ExtrudeGeometry(triangleShape,{depth:.09,bevelEnabled:true,bevelSize:.02,bevelThickness:.02,bevelSegments:4});triangleGeometry.translate(0,0,-.045);
   mesh(triangle,triangleGeometry,body);pin(triangle,0,0,.08);pin(triangle,-d.referenceOffset,0,.08);pin(triangle,0,d.toolBracket,.08);
+  buildStage=3;
   rod('hardware-tool-level-rod','H','I',d.forearm,.12,.40,side);
   const tool=new THREE.Group();tool.name='hardware-passive-tool-mount';turntable.add(tool);
   for(const z of [-.18,.18]){
     const bracket=mesh(tool,capsule(d.toolBracket,.14,.09),body,0,0,z);bracket.rotation.z=Math.PI/2;
     pin(tool,0,0,z+.065);pin(tool,0,d.toolBracket,z+.065);
   }
+  buildStage=4;
   // The leveling linkage is mechanical: no virtual wrist servo or roll channel.
   mesh(tool,box(.83,.11,.61),body,.29,-.10,0);
   mesh(tool,box(.39,.07,.32),side,.14,-.015,0);
@@ -116,13 +124,15 @@ export function createHardwareArmModel() {
     pin(jaw,0,.058,0,'y');return jaw;
   });
   const axles = ([['A',.0,.94],['B',.10,.76],['C',-.235,.50],['D',-.43,.20],['F',.40,.18],['G',.40,.18],['H',.40,.18],['I',.25,.45],['E',0,.50]] as const).map(([point,z,depth])=>{
+    buildStage=['A','B','F','G','H'].includes(point)?2:3;
     const object=cylinder(turntable,.049,depth,metal,0,0,z);
     return {point,object};
   });
   const setAspect=(aspect:number)=>{
     const half=2.65/Math.min(1,aspect);camera.left=-half*aspect;camera.right=half*aspect;camera.top=half;camera.bottom=-half;camera.updateProjectionMatrix();
   };
-  const state={scene,camera,setAspect,jointAnchors:JOINT_IDS.map(()=>({x:0,y:0})),phase:'Illustrative motion · calibration pending',
+  const setAssembly=(count:number)=>{scene.traverse(object=>{if(object instanceof THREE.Mesh)object.visible=object.userData.assemblyStage<=Math.max(0,Math.min(4,count));});};
+  const state={scene,camera,setAspect,setAssembly,jointAnchors:JOINT_IDS.map(()=>({x:0,y:0})),phase:'Illustrative motion · calibration pending',
     update(seconds:number,activeJoint:string){
       const k=linkagePose(hardwareMotion(seconds));turntable.rotation.y=k.pose.yaw*Math.PI/180;
       for(const r of rods){
@@ -146,5 +156,5 @@ export function createHardwareArmModel() {
       geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());
     },
   };
-  setAspect(1);state.update(0,'J2');return state;
+  setAspect(1);setAssembly(assembledParts);state.update(0,'J2');return state;
 }

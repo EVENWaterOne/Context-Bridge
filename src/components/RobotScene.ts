@@ -6,7 +6,7 @@ import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferG
 import { BUILD_DURATION, motionPose, smooth, solveArm, type MotionMode } from './robotMotion.ts';
 
 export interface JointAnchor { x: number; y: number }
-export interface RobotScene { render(seconds: number, activeJoint: string): void; dispose(): void; phase: string; jointAnchors: JointAnchor[] }
+export interface RobotScene { render(seconds: number, activeJoint: string, assembledParts?:number): void; dispose(): void; phase: string; jointAnchors: JointAnchor[] }
 type Material = THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
 const palette = ['#a349f4', '#00bfd1', '#f1c82d', '#ff7138'];
 const hex = [[.7, 1.05], [-.7, 1.05], [-1.36, 0], [-.7, -1.05], [.7, -1.05], [1.36, 0]];
@@ -180,7 +180,7 @@ function poseArm(rig: ArmRig, x: number, y: number, open: number, wristTilt = 0,
   rig.fingers[0].rotation.z=-.58*open;rig.fingers[1].rotation.z=.58*open;
 }
 
-export function createRobotModel(mode: MotionMode) {
+export function createRobotModel(mode: MotionMode): ReturnType<typeof createMascotModel> & {setAssembly?:(count:number)=>void} {
   return mode === 'arm' ? createHardwareArmModel() : createMascotModel(mode);
 }
 
@@ -325,13 +325,14 @@ function createMascotModel(mode: Exclude<MotionMode, 'arm'>) {
 }
 
 /** The DOM renderer is separate so the identical model can also be rendered offline. */
-export function createRobotScene(host: HTMLElement, mode: MotionMode): RobotScene {
+export function createRobotScene(host: HTMLElement, mode: MotionMode, assembledParts=4): RobotScene {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = false;
   host.appendChild(renderer.domElement);
   const model = createRobotModel(mode);
+  model.setAssembly?.(assembledParts);
   const environment = new RoomEnvironment(), pmrem = new THREE.PMREMGenerator(renderer), envMap = pmrem.fromScene(environment, .04);
   model.scene.environment = envMap.texture; model.scene.environmentIntensity = .6;
   environment.dispose(); pmrem.dispose();
@@ -342,7 +343,7 @@ export function createRobotScene(host: HTMLElement, mode: MotionMode): RobotScen
   return {
     get phase() { return model.phase; },
     get jointAnchors() { return model.jointAnchors; },
-    render(seconds, activeJoint) { if (disposed) return;currentSeconds=seconds;currentJoint=activeJoint; model.update(seconds, activeJoint); renderer.render(model.scene, model.camera); },
+    render(seconds, activeJoint, assembledParts=4) { if (disposed) return;model.setAssembly?.(assembledParts);currentSeconds=seconds;currentJoint=activeJoint; model.update(seconds, activeJoint); renderer.render(model.scene, model.camera); },
     dispose() { disposed = true; sizeObserver.disconnect(); model.dispose(); envMap.dispose(); renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove(); },
   };
 }
