@@ -32,7 +32,12 @@ export function inferFileKind(name: string): ProjectFile['kind'] {
   if (/\.(txt|md)$/i.test(name)) return 'note';
   return 'other';
 }
+/** A first visit uses the same empty assembly as a newly created task. */
 export function createInitialWorkspace(): Workspace {
+  return createTask({version:1,tasks:[],activeTaskId:'',stage:'setup'},'My first build');
+}
+/** Sample data is opt-in; it must never determine a new visitor's starting point. */
+export function createExampleWorkspace(): Workspace {
   const createdAt = '2026-10-25T08:00:00.000Z';
   const history: Round = {
     id: 'arm-round-6', number: 6, createdAt, completedAt: '2026-10-25T08:12:00.000Z', applied: true, result: 'Better', note: 'The reach is stable. Return still feels abrupt.',

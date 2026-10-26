@@ -11,6 +11,7 @@ const partCopy={
   J3:{title:'Extend the forearm.',description:'The opposite base-mounted servo drives the forearm through a linkage. The elbow pivot is passive.',added:'Forearm + linkage'},
   J4:{title:'Finish with the gripper.',description:'One servo opens and closes both jaws. This arm has no independent wrist motor.',added:'Coupled gripper'},
 };
+const futureHardware=[['Mobile robot','Wheels & steering'],['Soft robot','Flexible actuators'],['Biped robot','Legs & balance']] as const;
 type Props={task:Task;onChange:(patch:Partial<Hardware>)=>void;onName:(name:string)=>void;onFinish:()=>void;onFiles:()=>void;onLeave:()=>void};
 
 export function HardwareSetup({task,onChange,onName,onFinish,onFiles,onLeave}:Props){
@@ -54,9 +55,12 @@ export function HardwareSetup({task,onChange,onName,onFinish,onFiles,onLeave}:Pr
         {step===0?<>
           <p className="muted">What are you building? We’ll map its moving parts together.</p>
           <button className={`hardware-category ${assembly.category?'selected':''}`} type="button" aria-pressed={!!assembly.category} onClick={()=>patchAssembly({category:'robot-arm'})}>
-            <span className="category-type">ROBOTICS</span><strong>Robot arm</strong><span>Base → shoulder → forearm → gripper</span><span className="category-bottom"><small>4-servo linkage arm</small><span aria-hidden="true">↗</span></span>
+            <span className="category-top"><span className="category-type">ROBOTICS</span><span className="category-status">Available in demo</span></span><strong>Robot arm</strong><span>Base → shoulder → forearm → gripper</span><span className="category-bottom"><small>4-servo linkage arm</small><span aria-hidden="true">↗</span></span>
           </button>
-          <p className="fine">Built around your desktop linkage arm. Each step adds one actuator and the structure it moves.</p>
+          <div className="future-hardware" role="group" aria-label="Other hardware categories">
+            {futureHardware.map(([name,description])=><button key={name} type="button" className="hardware-coming" disabled aria-label={`${name} — not available in this demo`}><strong>{name}</strong><span>{description}</span><small>Not in demo</small></button>)}
+          </div>
+          <p className="fine">More kinds of builds. One shared workflow.<br/>This demo supports the 4-servo linkage arm.</p>
         </>:step<5?<>
           <p className="muted part-description">{partCopy[joint].description}</p>
           <div className="part-parameter-fields">

@@ -62,7 +62,7 @@ Assembly topology was cross-checked against [the original EEZYbotARM assembly gu
 
 ## Guided assembly (v1.4.0)
 
-New tasks begin with an empty workbench. Selecting the robot-arm category opens four consecutive actuator forms; only confirming a part reveals its corresponding geometry. Servo model, optional control pin/channel, optional measured angle limits and draft form inputs persist with the task. Duplicate assigned pins, missing calibration fields and inverted limits are rejected. Existing tasks open their saved assembly for inspection rather than rebuilding it.
+First-time homepage login / registration and new tasks begin with an empty workbench, one round and no preloaded project files. Returning visitors resume their saved work. The category chooser also shows Mobile robot, Soft robot and Biped robot as disabled “Not in demo” options; only Robot arm is available. Selecting it opens four consecutive actuator forms; only confirming a part reveals its corresponding geometry. Servo model, optional control pin/channel, optional measured angle limits and draft form inputs persist with the task. Duplicate assigned pins, missing calibration fields and inverted limits are rejected. Existing tasks open their saved assembly for inspection rather than rebuilding it.
 
 The current category is explicitly the owner's four-servo linkage arm, not a general-purpose arbitrary robot builder. Completing setup requires all four parts plus controller and connection. It generates a hardware context file while preserving uploaded files. The downstream mock workflow continues to simulate motion without driving physical hardware.
 

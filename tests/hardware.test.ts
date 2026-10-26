@@ -4,7 +4,7 @@ import { Vector3 } from 'three';
 import { ARM_DIMENSIONS as d, hardwareMotion, linkagePose } from '../src/components/hardwareKinematics.ts';
 import { createRobotModel } from '../src/components/RobotScene.ts';
 import { pendingCalibration, servoCommand, hardwareDescription } from '../src/lib/hardware.ts';
-import { createInitialWorkspace, loadWorkspace, getActiveTask, makeFile, updateHardware } from '../src/lib/workflow.ts';
+import { createExampleWorkspace, loadWorkspace, getActiveTask, makeFile, updateHardware } from '../src/lib/workflow.ts';
 const distance=(a:{x:number;y:number},b:{x:number;y:number})=>Math.hypot(a.x-b.x,a.y-b.y);
 const near=(a:number,b:number)=>assert.ok(Math.abs(a-b)<1e-9,`${a} != ${b}`);
 
@@ -44,7 +44,7 @@ test('unprovided servo limits are never guessed; calibrated commands respect ran
   assert.deepEqual(description.servoCalibration,pendingCalibration());
 });
 test('old arm presets migrate to four channels without losing uploaded files or previous rounds',()=>{
-  const old=createInitialWorkspace(),arm=getActiveTask(old);delete arm.hardware.profile;delete arm.hardware.servoCalibration;
+  const old=createExampleWorkspace(),arm=getActiveTask(old);delete arm.hardware.profile;delete arm.hardware.servoCalibration;
   arm.rounds[0].observation.joint='J2';arm.rounds[1].observation.joint='J3';
   const uploaded=makeFile('calibration.json','{"J4":{"min":30,"max":120}}','hardware');arm.files.push(uploaded);
   const migrated=getActiveTask(loadWorkspace({getItem:()=>JSON.stringify(old),setItem:()=>{}}));
@@ -54,7 +54,7 @@ test('old arm presets migrate to four channels without losing uploaded files or 
 });
 
 test('controller changes update generated context while retaining user hardware files',()=>{
- const initial=createInitialWorkspace();const userFile=makeFile('my-hardware.json','original','hardware');getActiveTask(initial).files.push(userFile);
+ const initial=createExampleWorkspace();const userFile=makeFile('my-hardware.json','original','hardware');getActiveTask(initial).files.push(userFile);
  const task=getActiveTask(updateHardware(initial,{controller:'STM32F103C8T6'}));
  assert.equal(JSON.parse(task.files.find(f=>f.name==='hardware.json')!.content).controller,task.hardware.controller);
  assert.deepEqual(task.files.find(f=>f.id===userFile.id),userFile);

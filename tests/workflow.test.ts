@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createInitialWorkspace, getActiveTask, getActiveRound, updateRound, updateTask, switchTask, createTask, completeRound, applyRoundChange, loadWorkspace, saveWorkspace, STORAGE_KEY, makeFile } from '../src/lib/workflow.ts';
+import { createExampleWorkspace, getActiveTask, getActiveRound, updateRound, updateTask, switchTask, createTask, completeRound, applyRoundChange, loadWorkspace, saveWorkspace, STORAGE_KEY, makeFile } from '../src/lib/workflow.ts';
 import { buildSuggestion, mockAgent, createHttpAgent } from '../src/lib/agent.ts';
 import type { Workspace, StorageLike } from '../src/lib/workflow.ts';
 function observed(): Workspace {
-  let state = createInitialWorkspace();
+  let state = createExampleWorkspace();
   state = updateRound(state, { observation: { ...getActiveRound(state).observation, issues: ['Too fast'], detail: 'The elbow snaps back.' } });
   const suggestion = buildSuggestion({ task: getActiveTask(state), round: getActiveRound(state) });
   return updateRound(state, { suggestion });
@@ -49,10 +49,11 @@ test('storage roundtrip preserves files, history, and current observation', () =
   assert.deepEqual(loadWorkspace(storage), state);
 });
 test('corrupt, malformed, and obsolete stored state resets safely', () => {
-  for (const value of ['broken{', '{}', '{"version":9}', JSON.stringify({ ...createInitialWorkspace(), activeTaskId: 'missing' })]) {
-    assert.equal(getActiveTask(loadWorkspace(memory(value))).id, 'task-desk-arm');
+  for (const value of ['broken{', '{}', '{"version":9}', JSON.stringify({ ...createExampleWorkspace(), activeTaskId: 'missing' })]) {
+    const restored=getActiveTask(loadWorkspace(memory(value)));
+    assert.equal(restored.name,'My first build');assert.equal(restored.hardware.joints,0);assert.equal(restored.rounds.length,1);assert.equal(restored.files.length,0);
   }
-  const state = createInitialWorkspace(); (state.tasks[0].rounds[0].observation as unknown as { desired: unknown }).desired = 'bad';
+  const state = createExampleWorkspace(); (state.tasks[0].rounds[0].observation as unknown as { desired: unknown }).desired = 'bad';
   assert.equal(loadWorkspace(memory(JSON.stringify(state))).stage, 'setup');
 });
 test('interrupted Agent operations recover to a safe retry screen', () => {
@@ -104,7 +105,7 @@ test('applied rounds cannot silently be rewritten through backward navigation', 
 });
 test('file import replaces duplicate names and remains bound to its original task', async () => {
   const { upsertFiles } = await import('../src/lib/workflow.ts');
-  const initial = createInitialWorkspace();
+  const initial = createExampleWorkspace();
   const originalFileId = getActiveTask(initial).files.find(f => f.name === 'motion.py')!.id;
   const switched = switchTask(initial, 'task-gripper');
   const state = upsertFiles(switched, [makeFile('motion.py', '# replacement\n', 'code'), makeFile('notes.txt', 'first'), makeFile('notes.txt', 'last')], 'task-desk-arm');
@@ -127,7 +128,7 @@ test('configured hardware is only reopened by an explicit task switch', async ()
 
 test('multiple observations toggle independently and survive save/reload', async () => {
   const { toggleIssue } = await import('../src/lib/workflow.ts');
-  let state = createInitialWorkspace();
+  let state = createExampleWorkspace();
   state = toggleIssue(toggleIssue(state, 'Too fast'), 'Shaking');
   assert.deepEqual(getActiveRound(state).observation.issues, ['Too fast', 'Shaking']);
   const storage = memory(); saveWorkspace(state, storage);
