@@ -6,7 +6,9 @@ import sys, subprocess, shutil, os, hashlib
 from pathlib import Path
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
-sources=['src/components/RobotScene.ts','src/components/robotMotion.ts','scripts/export-robot-scenes.mjs','scripts/render-robot-fallback.py','scripts/build-robot-fallbacks.py']
+modes=os.environ.get('ROBOT_RENDER_MODES','arm,hero,inspect,build').split(',')
+if not modes or any(mode not in ['arm','hero','inspect','build'] for mode in modes):raise ValueError('Unknown render mode')
+sources=['src/components/HardwareArm.ts','src/components/hardwareKinematics.ts','src/lib/hardware.ts','src/components/RobotScene.ts','src/components/robotMotion.ts','scripts/export-robot-scenes.mjs','scripts/render-robot-fallback.py','scripts/build-robot-fallbacks.py']
 fingerprint=hashlib.sha256(b''.join(Path(p).read_bytes() for p in sources)).hexdigest()[:12]
 cache=Path('.render-cache')/fingerprint;cache.mkdir(parents=True,exist_ok=True)
 output=Path('public/assets/robot');output.mkdir(parents=True,exist_ok=True)
@@ -32,4 +34,4 @@ def render(mode):
    temporary=output/(source.name+'.tmp');shutil.copyfile(source,temporary);temporary.replace(output/source.name)
   print(f'{mode}: video and poster ready',flush=True)
  finally:slots.put(slot)
-with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(render,['arm','hero','inspect','build']))
+with ThreadPoolExecutor(max_workers=2) as pool:list(pool.map(render,modes))

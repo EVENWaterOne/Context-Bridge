@@ -1,10 +1,11 @@
+import { HARDWARE_PROFILE, hardwareDescription, pendingCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
 /** Browser-local prototype state. No passwords or external service credentials are persisted. */
 export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigating' | 'review' | 'applying' | 'test' | 'feedback';
 export type Issue = 'Too fast' | 'No motion' | 'Wrong way' | 'Shaking' | 'Error message' | 'Other';
 export type Feedback = 'Better' | 'Same' | 'Worse' | 'Not sure';
-export type Joint = 'J1' | 'J2' | 'J3';
+export type Joint = HardwareJoint;
 export type Phase = 'Home' | 'Reach' | 'Pause' | 'Return';
-export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean }
+export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits }
 export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string }
 export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
 export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string }
@@ -34,37 +35,38 @@ export function createInitialWorkspace(): Workspace {
   const createdAt = '2026-10-25T08:00:00.000Z';
   const history: Round = {
     id: 'arm-round-6', number: 6, createdAt, completedAt: '2026-10-25T08:12:00.000Z', applied: true, result: 'Better', note: 'The reach is stable. Return still feels abrupt.',
-    observation: { joint: 'J2', issues: ['Shaking'], phase: 'Reach', detail: 'The elbow jitters near the end of reach.', desired: ['Smoother motion'], includePrevious: false },
+    observation: { joint: 'J3', issues: ['Shaking'], phase: 'Reach', detail: 'The forearm linkage jitters near the end of reach.', desired: ['Smoother motion'], includePrevious: false },
     suggestion: { id: 'suggestion-history-arm', title: 'Ease into the target.', summary: 'Use eased interpolation at the end of reach.', rationale: 'A linear step gives the elbow a sudden stop. An ease-out curve reduces that discontinuity.', parameter: 'reach_easing', before: 'linear', after: 'ease_out', unit: '', fileName: 'motion.py', codeBefore: 'reach_easing = "linear"', codeAfter: 'reach_easing = "ease_out"', confidence: 'Example recommendation', evidence: ['Run 06 · reach oscillation', 'motion.py · interpolation'], steps: ['Change the easing curve.', 'Keep target angles unchanged.', 'Test the reach.'], risk: 'Check clearance before testing.' },
   };
   const active: Round = { id: 'arm-round-7', number: 7, observation: emptyObservation(), applied: false, createdAt };
   const arm: Task = {
     id: 'task-desk-arm', name: 'Desktop arm · return motion', createdAt, activeRoundId: active.id,
-    hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, notes: 'J1 base · J2 elbow · J3 wrist. Keep the work area clear.', configured: false },
+    hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, profile: HARDWARE_PROFILE, servoCalibration: pendingCalibration(), notes: 'J1 base · J2 shoulder · J3 forearm linkage · J4 gripper. No independent wrist axis. Servo calibration pending.', configured: false },
     files: [
-      makeFile('motion.py', '# Desktop arm · motion profile\nreach_easing = "ease_out"\nreturn_duration = 0.6\nservo_direction = 1\nstep_interval = 0.02\n\ndef return_home(arm):\n    arm.move_to([0, 45, 0], duration=return_duration)\n', 'code', 'sample'),
-      makeFile('hardware.json', JSON.stringify({ controller: 'ESP32', baudRate: 115200, joints: { J1: 'base', J2: 'elbow', J3: 'wrist' }, gripper: true, limits: { J1: [-90, 90], J2: [0, 120], J3: [-60, 60] } }, null, 2), 'hardware', 'sample'),
+      makeFile('motion.py', '# Desktop arm · motion profile\nreach_easing = "ease_out"\nreturn_duration = 0.6\nservo_direction = 1\nstep_interval = 0.02\n\ndef return_home(arm):\n    # No fabricated servo angles: home comes from the calibrated controller.\n    arm.return_to_calibrated_home(duration=return_duration)\n', 'code', 'sample'),
+      makeFile('hardware.json', JSON.stringify(hardwareDescription(), null, 2), 'hardware', 'sample'),
       makeFile('run-06.log', '[00:00.000] profile=reach\n[00:00.600] J2 target=45 actual=44.8\n[00:01.200] reach complete\n[00:01.800] return complete\n[observer] Reach is stable. Return is abrupt.\n', 'log', 'sample'),
     ], rounds: [history, active],
   };
-  const petHistory: Round = {
-    id: 'pet-round-1', number: 1, createdAt, completedAt: '2026-10-24T11:40:00.000Z', applied: true, result: 'Same', note: 'Touch response works, but the tail still moves too abruptly.',
-    observation: { joint: 'J1', issues: ['Too fast'], phase: 'Return', detail: 'Tail snaps to neutral after a greeting.', desired: ['Smoother motion'], includePrevious: false },
-    suggestion: { ...history.suggestion!, id: 'suggestion-history-pet', title: 'Slow the tail return.', parameter: 'return_duration', before: '0.3', after: '0.6', unit: 's', fileName: 'tail.py', codeBefore: 'return_duration = 0.3', codeAfter: 'return_duration = 0.6', summary: 'Give the tail more time to settle.', rationale: 'Longer interpolation reduces the sudden stop.', evidence: ['Tail greeting trace'], steps: ['Update the return duration.', 'Replay the greeting.'] },
-  };
-  const petActive: Round = { ...newRound(2), id: 'pet-round-2' };
-  const pet: Task = {
-    id: 'task-desktop-pet', name: 'Desktop pet · tail response', createdAt, activeRoundId: petActive.id,
-    hardware: { name: 'Desktop companion', controller: 'Raspberry Pi + ESP32', connection: 'USB serial · 115200 baud', joints: 1, gripper: false, notes: 'Tail servo on J1. Test with low amplitude.', configured: false },
-    files: [makeFile('tail.py', '# Tail response\nreturn_duration = 0.6\nservo_direction = 1\nstep_interval = 0.02\n', 'code', 'sample'), makeFile('pet-hardware.json', '{\n  "controller": "ESP32",\n  "joints": 1,\n  "tailPin": 18\n}\n', 'hardware', 'sample'), makeFile('run-01.log', '[touch] greeting detected\n[tail] return complete in 0.6s\n[observer] Still abrupt.\n', 'log', 'sample')], rounds: [petHistory, petActive],
-  };
-  return { version: 1, tasks: [arm, pet], activeTaskId: arm.id, stage: 'setup' };
+  const gripHistory: Round = { ...history, id: 'grip-round-1', number: 1,
+    observation: { ...history.observation, joint: 'J4', detail: 'The coupled jaws hesitate during closing.' },
+    note: 'Jaw movement is steadier. Check the closing timing next.' };
+  const gripActive: Round = { ...newRound(2), id: 'grip-round-2' };gripActive.observation.joint='J4';
+  const grip: Task = { ...arm, id:'task-gripper', name:'Desktop arm · gripper timing', activeRoundId:gripActive.id,
+    hardware:{...arm.hardware,servoCalibration:pendingCalibration()},files:arm.files.map(f=>({...f,id:id('file')})),rounds:[gripHistory,gripActive] };
+  return { version: 1, tasks: [arm, grip], activeTaskId: arm.id, stage: 'setup' };
 }
 export function getActiveTask(state: Workspace): Task { const task = state.tasks.find(t => t.id === state.activeTaskId); if (!task) throw new Error('Active task is missing.'); return task; }
 export function getActiveRound(state: Workspace): Round { const task = getActiveTask(state); const round = task.rounds.find(r => r.id === task.activeRoundId); if (!round) throw new Error('Active round is missing.'); return round; }
 export function updateTask(state: Workspace, patch: Partial<Omit<Task, 'id'>>, taskId = state.activeTaskId): Workspace {
   if (!state.tasks.some(t => t.id === taskId)) throw new Error('Task not found.');
   return { ...state, tasks: state.tasks.map(t => t.id === taskId ? { ...t, ...patch } : t) };
+}
+/** Keep the generated context description in step with the selected controller. */
+export function updateHardware(state: Workspace, patch: Partial<Hardware>): Workspace {
+  const task=getActiveTask(state),hardware={...task.hardware,...patch};
+  const content=JSON.stringify({...hardwareDescription(hardware.controller),connection:hardware.connection,servoCalibration:hardware.servoCalibration??pendingCalibration()},null,2);
+  return updateTask(state,{hardware,files:task.files.map(file=>file.source==='sample'&&file.name==='hardware.json'?{...file,content,size:new TextEncoder().encode(content).length,updatedAt:now()}:file)});
 }
 export function updateRound(state: Workspace, patch: Partial<Omit<Round, 'id' | 'number'>>, roundId = getActiveTask(state).activeRoundId): Workspace {
   const task = getActiveTask(state);
@@ -107,7 +109,7 @@ export function switchTask(state: Workspace, taskId: string): Workspace {
 export function createTask(state: Workspace, name: string): Workspace {
   const clean = name.trim(); if (!clean) throw new Error('Give your task a name.');
   const round = newRound(1);
-  const task: Task = { id: id('task'), name: clean.slice(0, 100), createdAt: now(), activeRoundId: round.id, hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, notes: '', configured: false }, files: [], rounds: [round] };
+  const task: Task = { id: id('task'), name: clean.slice(0, 100), createdAt: now(), activeRoundId: round.id, hardware: { name: 'Desktop robot arm', controller: 'ESP32', connection: 'USB serial · 115200 baud', joints: 3, gripper: true, profile: HARDWARE_PROFILE, servoCalibration: pendingCalibration(), notes: 'Four SG90 actuators; mechanical wrist leveling; servo calibration pending.', configured: false }, files: [], rounds: [round] };
   return { ...state, tasks: [...state.tasks, task], activeTaskId: task.id, stage: 'setup' };
 }
 export function completeRound(state: Workspace, result: Feedback, note = ''): Workspace {
@@ -164,6 +166,14 @@ export function loadWorkspace(storage = browserStorage()): Workspace {
       }
     }
     if (!isValidWorkspace(value)) return createInitialWorkspace();
+    // Upgrade only the old arm preset; keep imported files and unrelated hardware.
+    value.tasks=value.tasks.map(task=>{
+      if(task.hardware.profile || (task.hardware.name!=='Desktop robot arm'&&task.id!=='task-desk-arm'))return task;
+      const hardware={...task.hardware,joints:3,gripper:true,profile:HARDWARE_PROFILE,servoCalibration:pendingCalibration(),notes:'J1 base · J2 shoulder · J3 forearm linkage · J4 gripper. Servo calibration pending.'};
+      const rounds=task.rounds.map(round=>({...round,observation:{...round.observation,joint:round.observation.joint==='J2'?'J3' as const:round.observation.joint==='J3'?'J4' as const:round.observation.joint}}));
+      const files=task.files.map(file=>file.source==='sample'&&file.name==='hardware.json'?{...file,content:JSON.stringify(hardwareDescription(hardware.controller),null,2),updatedAt:now(),size:new TextEncoder().encode(JSON.stringify(hardwareDescription(hardware.controller),null,2)).length}:file);
+      return {...task,hardware,rounds,files};
+    });
     // Work in flight is restartable; a refresh never pretends an interrupted operation completed.
     const stage = value.stage === 'investigating' ? 'request' : value.stage === 'applying' ? 'review' : value.stage;
     return { ...value, stage };

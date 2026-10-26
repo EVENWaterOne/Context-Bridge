@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createHardwareArmModel } from './HardwareArm.ts';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -180,6 +181,10 @@ function poseArm(rig: ArmRig, x: number, y: number, open: number, wristTilt = 0,
 }
 
 export function createRobotModel(mode: MotionMode) {
+  return mode === 'arm' ? createHardwareArmModel() : createMascotModel(mode);
+}
+
+function createMascotModel(mode: Exclude<MotionMode, 'arm'>) {
   const scene = new THREE.Scene(); scene.background = new THREE.Color('#f3f3ef');
   const body = new THREE.MeshPhysicalMaterial({ color: '#989994', roughness: .46, metalness: .18, envMapIntensity: .6, clearcoat:.12, clearcoatRoughness:.5 });
   const dark = new THREE.MeshStandardMaterial({ color: '#353735', roughness: .56, metalness: .18 });
@@ -197,15 +202,7 @@ export function createRobotModel(mode: MotionMode) {
   let magnifier: THREE.Group | undefined, heldBlock: THREE.Mesh | undefined, sourceBlock: THREE.Mesh | undefined, placedBlock: THREE.Mesh | undefined;
   const evidence: THREE.Group[] = [];
   const lensMaterial = new THREE.MeshPhysicalMaterial({ color: '#ffffff', roughness: .015, metalness: 0, transmission: 1, thickness: .025, ior: 1.12, transparent: true, opacity: .22, clearcoat: 1, envMapIntensity: .6 });
-  if (mode === 'arm') {
-    actor.position.x = -.8;
-    mesh(actor, new THREE.CylinderGeometry(.65, .85, .20, 96), dark, 0, .10);
-    mesh(actor, new THREE.CylinderGeometry(.60, .72, .20, 96), body, 0, .29);
-    mesh(actor, new THREE.CylinderGeometry(.44, .48, .43, 80), body, 0, .59);
-    const trim = mesh(actor, new THREE.TorusGeometry(.46, .035, 16, 96), yellow, 0, .78); trim.rotation.x = Math.PI / 2;
-    rig = makeArm(torso, body, dark, 1.1); rig.root.position.y = .95;
-    camera.position.set(4.5, 4.7, 10); camera.lookAt(.15, 1.85, 0);
-  } else {
+  {
     actor.position.x = mode === 'hero' ? .18 : -.75;
     torso.position.y = 2.12;
     // The same bevelled solid shell is reused for home, searching, building and feedback.
@@ -278,7 +275,7 @@ export function createRobotModel(mode: MotionMode) {
   }
   const setAspect = (aspect: number) => {
     // Keep the complete arm sweep in a square safe area, even in a narrow column.
-    const half = mode === 'arm' ? 2.75 / Math.min(1,aspect) : 3.05;
+    const half = 3.05;
     camera.left = -half * aspect; camera.right = half * aspect; camera.top = half; camera.bottom = -half; camera.updateProjectionMatrix();
   };
   batchStaticParts(torso);
@@ -289,11 +286,7 @@ export function createRobotModel(mode: MotionMode) {
     phase: '',
     update(seconds: number, activeJoint: string) {
       const pose = motionPose(mode, seconds); state.phase = pose.phase;
-      if (mode === 'arm') {
-        torso.rotation.y = Math.sin(seconds * .52) * .12;
-        poseArm(rig, pose.x, pose.y - .95, pose.open);
-        rig.accents.forEach((material, i) => { material.color.set(activeJoint === `J${i + 1}` ? '#f3d548' : '#969c99'); material.emissive.set(activeJoint === `J${i + 1}` ? '#8f740b' : '#000000'); material.emissiveIntensity = .18; });
-      } else {
+      {
         const breath = Math.sin(seconds * .9) * .035;
         torso.position.y = 2.12 + breath;
         torso.rotation.y=mode==='hero'?Math.sin(seconds*.52)*.06:mode==='inspect'?.55+Math.sin(seconds*.6)*.035:.52;

@@ -24,8 +24,8 @@ test('feedback creates a new observation round without returning to hardware set
 });
 test('only task switch or create deliberately returns to setup, preserving the previous task', () => {
   const original = observed(), previous = getActiveTask(original);
-  let state = switchTask({ ...original, stage: 'review' }, 'task-desktop-pet');
-  assert.equal(state.stage, 'setup'); assert.equal(getActiveTask(state).name, 'Desktop pet · tail response');
+  let state = switchTask({ ...original, stage: 'review' }, 'task-gripper');
+  assert.equal(state.stage, 'setup'); assert.equal(getActiveTask(state).name, 'Desktop arm · gripper timing');
   assert.deepEqual(state.tasks.find(t => t.id === previous.id), previous);
   state = createTask(state, '  New arm  '); assert.equal(state.stage, 'setup'); assert.equal(getActiveTask(state).name, 'New arm');
   assert.equal(getActiveRound(state).number, 1); assert.equal(getActiveTask(state).files.length, 0);
@@ -106,9 +106,9 @@ test('file import replaces duplicate names and remains bound to its original tas
   const { upsertFiles } = await import('../src/lib/workflow.ts');
   const initial = createInitialWorkspace();
   const originalFileId = getActiveTask(initial).files.find(f => f.name === 'motion.py')!.id;
-  const switched = switchTask(initial, 'task-desktop-pet');
+  const switched = switchTask(initial, 'task-gripper');
   const state = upsertFiles(switched, [makeFile('motion.py', '# replacement\n', 'code'), makeFile('notes.txt', 'first'), makeFile('notes.txt', 'last')], 'task-desk-arm');
-  assert.equal(state.activeTaskId, 'task-desktop-pet');
+  assert.equal(state.activeTaskId, 'task-gripper');
   assert.deepEqual(getActiveTask(state).files, getActiveTask(switched).files);
   const files = state.tasks.find(t => t.id === 'task-desk-arm')!.files;
   assert.equal(files.filter(f => f.name === 'motion.py').length, 1);

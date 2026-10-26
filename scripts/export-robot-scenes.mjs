@@ -3,7 +3,9 @@ import { createRobotModel } from '../src/components/RobotScene.ts';
 const fps = 16;
 const cacheDir = process.env.ROBOT_RENDER_CACHE || '.render-cache/v3';
 fs.mkdirSync(cacheDir,{recursive:true});
-for (const mode of ['hero','arm','inspect','build']) {
+const modes=(process.env.ROBOT_RENDER_MODES || 'hero,arm,inspect,build').split(',');
+if(modes.some(mode=>!['hero','arm','inspect','build'].includes(mode)))throw new Error('Unknown render mode');
+for (const mode of modes) {
   const model = createRobotModel(mode), nodes = [], geometries = {}, materials = {};
   model.update(0,mode==='arm'?'':'J2');
   model.scene.traverse(o => {

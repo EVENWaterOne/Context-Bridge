@@ -60,9 +60,9 @@ test('arm motion and its joint callouts stay within the model area at narrow and
             assert.ok(Math.abs(p.x)<.9&&Math.abs(p.y)<.9,`arm outside safe area at ${width}×${height}, ${t}s`);
           }
         }
-        const labels=layoutJointLabels(model.jointAnchors,width,height,Array(3).fill({width:92,height:30}));
+        const labels=layoutJointLabels(model.jointAnchors,width,height,Array(4).fill({width:92,height:30}));
         labels.forEach(p=>{assert.ok(p.x>=8&&p.x+92<=width-8);assert.ok(p.y>=23&&p.y<=height-23)});
-        for(let i=0;i<3;i++)for(let j=i+1;j<3;j++){
+        for(let i=0;i<4;i++)for(let j=i+1;j<4;j++){
           const a=labels[i],b=labels[j];
           assert.ok(Math.abs(a.x-b.x)>=92||Math.abs(a.y-b.y)>=30,`joint labels overlap at ${width}×${height}, ${t}s`);
         }

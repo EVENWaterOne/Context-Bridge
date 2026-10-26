@@ -6,8 +6,8 @@ export function layoutJointLabels(anchors: Point[], width: number, height: numbe
   const placed: {x:number;y:number;width:number;height:number}[] = [];
   return anchors.map((anchor,i) => {
     const pin = {x:anchor.x * width,y:anchor.y * height}, size = sizes[i];
-    const x = clamp(i === 2 ? pin.x + 25 : pin.x - size.width - 25,8,width - size.width - 8);
-    let y = clamp(pin.y + (i === 1 ? -22 : 14),size.height/2 + 8,height - size.height/2 - 8);
+    const x = clamp(i >= 2 ? pin.x + 25 : pin.x - size.width - 25,8,width - size.width - 8);
+    let y = clamp(pin.y + [30,-22,0,-18][i],size.height/2 + 8,height - size.height/2 - 8);
     if(pin.x>=x-6&&pin.x<=x+size.width+6&&Math.abs(y-pin.y)<size.height/2+10){
       y=clamp(pin.y+(i===1?-1:1)*(size.height/2+12),size.height/2+8,height-size.height/2-8);
     }

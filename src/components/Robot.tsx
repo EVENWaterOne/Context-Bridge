@@ -4,8 +4,9 @@ import type { MotionMode } from './robotMotion';
 import { fitSquareAnchors, layoutJointLabels, type Point } from './robotLabels';
 import armJointTrack from './armJointTrack.json';
 import './Robot.css';
+import { JOINT_IDS, JOINTS, type HardwareJoint } from '../lib/hardware';
 
-export type RobotJoint = 'J1' | 'J2' | 'J3';
+export type RobotJoint = HardwareJoint;
 export type RobotMode = MotionMode;
 export type RobotProps = { mode?: RobotMode; className?: string; activeJoint?: RobotJoint; onJointSelect?: (joint: RobotJoint) => void; playing?: boolean; speed?: number; title?: string };
 
@@ -17,7 +18,7 @@ export function Robot({ mode = 'hero', className = '', activeJoint = 'J2', onJoi
   const [unavailable, setUnavailable] = useState(false);
   const controls = useRef({ playing, speed, activeJoint });
   controls.current = { playing, speed, activeJoint };
-  const label = title || (mode === 'arm' ? 'Articulated robot arm, matte grey with yellow joint accents' : mode === 'inspect' ? 'BIT examines the evidence with a transparent magnifying glass' : mode === 'build' ? 'BIT picks up, lifts, carries and places a block' : 'BIT, your AI hardware debugging companion');
+  const label = title || (mode === 'arm' ? 'Four SG90 linkage arm: base rotation, shoulder, forearm linkage and geared gripper; passive wrist' : mode === 'inspect' ? 'BIT examines the evidence with a transparent magnifying glass' : mode === 'build' ? 'BIT picks up, lifts, carries and places a block' : 'BIT, your AI hardware debugging companion');
   const placeJoints = (points:Point[], square=false) => {
     const layer=jointLayer.current, host=container.current;
     if(!layer||!host)return;
@@ -28,7 +29,7 @@ export function Robot({ mode = 'hero', className = '', activeJoint = 'J2', onJoi
     const pins=Array.from(layer.querySelectorAll<SVGCircleElement>('circle'));
     const anchors=square?fitSquareAnchors(points,width,height):points;
     const sizes=buttons.map(b=>({width:b.offsetWidth,height:b.offsetHeight}));
-    layoutJointLabels(anchors,width,height,sizes).forEach((p,i)=>{
+    layoutJointLabels(anchors.slice(0,buttons.length),width,height,sizes).forEach((p,i)=>{
       buttons[i].style.left=`${p.x}px`;buttons[i].style.top=`${p.y-sizes[i].height/2}px`;
       for(const [key,value] of Object.entries({x1:p.pin.x,y1:p.pin.y,x2:p.end.x,y2:p.end.y}))leaders[i].setAttribute(key,String(value));
       pins[i].setAttribute('cx',String(p.pin.x));pins[i].setAttribute('cy',String(p.pin.y));
@@ -89,8 +90,8 @@ export function Robot({ mode = 'hero', className = '', activeJoint = 'J2', onJoi
     <div ref={container} className="robot-viewport" role="img" aria-label={label}/>
     {unavailable && <video ref={video} className="robot-video" src={`/assets/robot/${mode}-loop.mp4`} poster={`/assets/robot/${mode}-poster.png`} muted loop playsInline preload="auto" aria-hidden="true"/>}
     {mode === 'arm' && onJointSelect && <div ref={jointLayer} className="robot-joints" aria-label="Choose a joint" style={{visibility:'hidden'}}>
-      <svg className="robot-joint-leaders" aria-hidden="true">{(['J1','J2','J3'] as const).map(joint=><g key={joint} className={activeJoint===joint?'is-selected':''}><line/><circle r="3"/></g>)}</svg>
-      {(['J1', 'J2', 'J3'] as const).map((joint, n) => <button type="button" key={joint} className={`robot-joint robot-joint--${n + 1} ${activeJoint === joint ? 'is-selected' : ''}`} onPointerDown={event=>{if(event.button===0)event.currentTarget.setPointerCapture(event.pointerId)}} onClick={() => onJointSelect(joint)} aria-pressed={activeJoint === joint}>{joint}<span>{['Base', 'Elbow', 'Gripper'][n]}</span></button>)}
+      <svg className="robot-joint-leaders" aria-hidden="true">{JOINT_IDS.map(joint=><g key={joint} className={activeJoint===joint?'is-selected':''}><line/><circle r="3"/></g>)}</svg>
+      {JOINT_IDS.map((joint, n) => <button type="button" key={joint} className={`robot-joint robot-joint--${n + 1} ${activeJoint === joint ? 'is-selected' : ''}`} onPointerDown={event=>{if(event.button===0)event.currentTarget.setPointerCapture(event.pointerId)}} onClick={() => onJointSelect(joint)} aria-pressed={activeJoint === joint}>{joint}<span>{JOINTS[joint].name}</span></button>)}
     </div>}
     {(mode === 'build' || mode === 'inspect') && <span className="robot-motion-caption" ref={phase} aria-hidden="true"/>}
   </div>;
