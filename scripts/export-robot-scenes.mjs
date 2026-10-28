@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import { createRobotModel } from '../src/components/RobotScene.ts';
-const fps = 16;
 const assemblyStills=process.env.ROBOT_ASSEMBLY_STILLS==='1';
 const cacheDir = process.env.ROBOT_RENDER_CACHE || '.render-cache/v3';
 fs.mkdirSync(cacheDir,{recursive:true});
@@ -8,6 +7,7 @@ const modes=(process.env.ROBOT_RENDER_MODES || 'hero,arm,inspect,build').split('
 if(assemblyStills&&modes.some(mode=>mode!=='arm'))throw new Error('Assembly stills support the hardware arm only');
 if(modes.some(mode=>!['hero','arm','inspect','build'].includes(mode)))throw new Error('Unknown render mode');
 for (const mode of modes) {
+  const fps = mode === 'inspect' || mode === 'build' ? 24 : 16;
   const model = createRobotModel(mode), nodes = [], geometries = {}, materials = {};
   model.update(0,mode==='arm'?'':'J2');
   model.scene.traverse(o => {

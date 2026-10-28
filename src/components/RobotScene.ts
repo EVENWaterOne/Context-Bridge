@@ -3,7 +3,7 @@ import { createHardwareArmModel } from './HardwareArm.ts';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { BUILD_DURATION, motionPose, smooth, solveArm, type MotionMode } from './robotMotion.ts';
+import { BUILD_DURATION, motionPose, smooth, solveArm, waitingMotion, type MotionMode } from './robotMotion.ts';
 
 export interface JointAnchor { x: number; y: number }
 export interface RobotScene { render(seconds: number, activeJoint: string, assembledParts?:number): void; dispose(): void; phase: string; jointAnchors: JointAnchor[] }
@@ -233,7 +233,7 @@ function createMascotModel(mode: Exclude<MotionMode, 'arm'>) {
     }
     const pixelMat = new THREE.MeshStandardMaterial({color:'#fff7de',emissive:'#fff0c9',emissiveIntensity:.8,roughness:.5,toneMapped:false});
     for (const x of [-.34, .34]) {
-      const eye = new THREE.Group(); eye.position.set(x, .01, .648); torso.add(eye); eyes.push(eye);
+      const eye = new THREE.Group(); eye.name=x<0?'bit-eye-left':'bit-eye-right'; eye.position.set(x, .01, .648); torso.add(eye); eyes.push(eye);
       for (let row = 0; row < 6; row++) for (let col = 0; col < 3; col++) mesh(eye, box(.052, .052, .012, .004), pixelMat, (col - 1) * .066, (row - 2.5) * .066);
     }
     [[.26,.16,.14,.30],[.42,.29,.17,.54],[.62,.45,.19,.80]].forEach(([outer,inner,height,y]) => { rings.push(mesh(actor, ringGeometry(outer, inner, height), body, 0, y, .25)); });
@@ -287,17 +287,24 @@ function createMascotModel(mode: Exclude<MotionMode, 'arm'>) {
     update(seconds: number, activeJoint: string) {
       const pose = motionPose(mode, seconds); state.phase = pose.phase;
       {
-        const breath = Math.sin(seconds * .9) * .035;
-        torso.position.y = 2.12 + breath;
-        torso.rotation.y=mode==='hero'?Math.sin(seconds*.52)*.06:mode==='inspect'?.55+Math.sin(seconds*.6)*.035:.52;
-        // Turn BIT toward the work, while the rotary mounting bearing keeps the
-        // arm's workspace fixed. Gripper contacts remain aligned with the props.
-        rig.root.rotation.y=mode==='hero'?0:-torso.rotation.y;
-        rings.forEach((ring, i) => { ring.position.y = [.30,.54,.80][i] + Math.sin(seconds * .9 - i * .22) * .02; });
-        const blink = seconds % 4.7, blinkScale = blink > 4.42 ? 1 - Math.sin((blink - 4.42) / .28 * Math.PI) * .94 : 1;
+        const follow = mode === 'hero' ? undefined : waitingMotion(mode, seconds);
+        const breath = follow?.bodyLift ?? Math.sin(seconds * .9) * .035;
+        torso.position.set(follow?.bodyX ?? 0, 2.12 + breath, 0);
+        torso.rotation.y = follow?.bodyYaw ?? Math.sin(seconds * .52) * .06;
+        // Aim the rotary bearing toward a 3D target, then solve in that arm plane.
+        // Body lean/float never drags the workbench, lens or block contact points.
+        const dx = pose.x - torso.position.x, depth = follow?.toolDepth ?? 0;
+        const armYaw = follow ? Math.atan2(-depth, dx) : torso.rotation.y;
+        rig.root.rotation.y = follow ? armYaw - torso.rotation.y : 0;
+        rings.forEach((ring, i) => {
+          ring.position.x = (follow?.bodyX ?? 0) * [.15,.28,.45][i];
+          ring.position.y = [.30,.54,.80][i] + Math.sin((follow?.cycle ?? seconds * .9) - i * .22) * .02;
+        });
+        const blink = seconds % 4.7;
+        const blinkScale = follow?.blink ?? (blink > 4.42 ? 1 - Math.sin((blink - 4.42) / .28 * Math.PI) * .94 : 1);
         eyes.forEach(eye => { eye.scale.y = blinkScale; eye.position.x = (eye.position.x < 0 ? -.34 : .34) + (mode === 'inspect' ? .03 : 0); });
-        poseArm(rig,pose.x,pose.y-(2.12+breath+1.39),mode==='inspect'?-1.2:pose.open,mode==='hero'?-Math.PI/2:mode==='inspect'?Math.sin(seconds*.75)*.15:0,mode==='hero'?1:-1);
-        if (magnifier) magnifier.rotation.y = Math.sin(seconds * .7) * .16;
+        poseArm(rig,follow?Math.hypot(dx,depth):pose.x,pose.y-(2.12+breath+1.39),mode==='inspect'?-1.2:pose.open,follow?.wristTilt ?? -Math.PI/2,mode==='hero'?1:-1);
+        if (magnifier) magnifier.rotation.y = follow?.lensYaw ?? 0;
         if (mode === 'build' && heldBlock && sourceBlock && placedBlock) {
           const t = (seconds % BUILD_DURATION) / BUILD_DURATION;
           heldBlock.visible = t >= .23 && t < .72;

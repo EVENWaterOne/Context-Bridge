@@ -2,7 +2,7 @@
 Uses Mesa software rendering when a GPU is unavailable. The source fingerprint keeps
 cached frames consistent; completed public assets are replaced only after encoding.
 """
-import sys, subprocess, shutil, os, hashlib
+import sys, subprocess, shutil, os, hashlib, json
 from pathlib import Path
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
@@ -27,8 +27,9 @@ def render(mode):
     subprocess.run([sys.executable,'scripts/render-robot-fallback.py',mode,'--animation'],env={**environment,'ROBOT_RENDER_SLOT':str(slot)},stdout=log,stderr=subprocess.STDOUT,check=True)
    shutil.copyfile(cache/mode/'frame-0001.png',poster)
    size=768 if mode=='hero' else 576
+   fps=json.loads((cache/f'{mode}.json').read_text())['fps']
    temporary=cache/f'{mode}-encoding.mp4'
-   subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-framerate','16','-i',str(cache/mode/'frame-%04d.png'),'-f','lavfi','-i',f'color=c=0xf3f3ef:s={size}x{size}:r=16','-filter_complex','[1:v][0:v]overlay=shortest=1:format=auto,format=yuv420p','-c:v','libx264','-preset','fast','-crf','18','-movflags','+faststart',str(temporary)],check=True)
+   subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-framerate',str(fps),'-i',str(cache/mode/'frame-%04d.png'),'-f','lavfi','-i',f'color=c=0xf3f3ef:s={size}x{size}:r={fps}','-filter_complex','[1:v][0:v]overlay=shortest=1:format=auto,format=yuv420p','-c:v','libx264','-preset','fast','-crf','18','-movflags','+faststart',str(temporary)],check=True)
    temporary.replace(movie)
   for source in [movie,poster]:
    temporary=output/(source.name+'.tmp');shutil.copyfile(source,temporary);temporary.replace(output/source.name)

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Vector3, Mesh, Raycaster, SRGBColorSpace } from 'three';
+import { Vector3, Quaternion, Mesh, Raycaster, SRGBColorSpace } from 'three';
 import { createRobotModel, bandColor } from '../src/components/RobotScene.ts';
-import { BUILD_DURATION } from '../src/components/robotMotion.ts';
+import { BUILD_DURATION, INSPECT_DURATION, motionPose, waitingMotion } from '../src/components/robotMotion.ts';
 import { layoutJointLabels } from '../src/components/robotLabels.ts';
 
 test('turning BIT toward the work preserves exact pickup and placement contacts', () => {
@@ -10,12 +10,48 @@ test('turning BIT toward the work preserves exact pickup and placement contacts'
   try {
     const position = (name: string) => model.scene.getObjectByName(name)!.getWorldPosition(new Vector3());
     const head = model.scene.getObjectByName('bit-head')!;
-    model.update(BUILD_DURATION * .23, 'J2');
-    assert.ok(head.rotation.y > .4, 'BIT faces right toward the working area');
-    assert.ok(position('block-held').distanceTo(position('block-source')) < .00001);
-    model.update(BUILD_DURATION * .72, 'J2');
-    assert.ok(position('block-held').distanceTo(position('block-placed')) < .00001);
+    for (const [start,end,prop] of [[.16,.23,'block-source'],[.72,.79,'block-placed']] as const) {
+      for (let t=start; t<=end; t+=.005) {
+        model.update(BUILD_DURATION * t, 'J2');
+        assert.ok(head.rotation.y > .4, 'BIT faces right toward the working area');
+        assert.ok(position('block-held').distanceTo(position(prop)) < .00001, `block slips during contact at ${t}`);
+        const held=model.scene.getObjectByName('block-held')!.getWorldQuaternion(new Quaternion());
+        const resting=model.scene.getObjectByName(prop)!.getWorldQuaternion(new Quaternion());
+        assert.ok(held.angleTo(resting)<.00001, 'held block aligns with the resting block');
+      }
+    }
   } finally { model.dispose(); }
+});
+
+test('both waiting poses turn, float, swivel and blink while the tool follows its workspace target', () => {
+  for (const [mode,duration] of [['inspect',INSPECT_DURATION],['build',BUILD_DURATION]] as const) {
+    const model=createRobotModel(mode);
+    try {
+      const head=model.scene.getObjectByName('bit-head')!,mount=model.scene.getObjectByName('bit-arm-mount')!,wrist=model.scene.getObjectByName('bit-gripper')!;
+      const eyes=['bit-eye-left','bit-eye-right'].map(name=>model.scene.getObjectByName(name)!);
+      const turns:number[]=[],heights:number[]=[],swivels:number[]=[],blinks:number[]=[];
+      for(let t=0;t<duration;t+=.025){
+        model.update(t,'J2');
+        turns.push(head.rotation.y);heights.push(head.position.y);swivels.push(mount.rotation.y);blinks.push(eyes[0].scale.y);
+        assert.equal(eyes[0].scale.y,eyes[1].scale.y);
+        assert.ok(head.rotation.y>.4&&head.rotation.y<.7,'BIT stays facing its work');
+        const pose=motionPose(mode,t),follow=waitingMotion(mode,t);
+        const expected=new Vector3(pose.x,pose.y,follow.toolDepth);
+        head.parent!.localToWorld(expected);
+        assert.ok(wrist.getWorldPosition(new Vector3()).distanceTo(expected)<.00001,`tool target drift at ${mode}, ${t}`);
+      }
+      const range=(values:number[])=>Math.max(...values)-Math.min(...values);
+      assert.ok(range(turns)>.15,'body visibly follows the work');
+      assert.ok(range(heights)>.12,'body gently floats');
+      assert.ok(range(swivels)>.15,'first joint swivels rather than remaining fixed');
+      assert.ok(Math.min(...blinks)<.1&&Math.abs(Math.max(...blinks)-1)<1e-8,'eyes fully blink and reopen');
+      const moving=[head,mount,wrist,...eyes];
+      model.update(0,'J2');
+      const start=moving.map(o=>o.matrixWorld.clone());
+      model.update(duration-.00001,'J2');
+      moving.forEach((o,i)=>o.matrixWorld.elements.forEach((v,j)=>assert.ok(Math.abs(v-start[i].elements[j])<.0001,'waiting loop must not jump')));
+    } finally { model.dispose(); }
+  }
 });
 
 test('the cyan to yellow transition stays colored rather than passing through white', () => {
