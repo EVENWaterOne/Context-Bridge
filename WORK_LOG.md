@@ -63,3 +63,9 @@ Build a single-user, localhost-only service for the existing React/Vite workbenc
 - User explicitly requested committing and pushing the completed local backend to GitHub.
 - Preflight: the 36 implementation/documentation files are staged, there are no unstaged source changes, and the staged whitespace check passes. `.data/`, Codex credentials, local SQLite, screenshots and test runtime artifacts are ignored and are not tracked.
 - Publish the implementation from `feat/local-codex-backend` to `origin/feat/local-codex-backend` and verify the remote commit ID after pushing. Existing verification above remains the implementation baseline; this publication step changes only this work record.
+
+### Corrected destination: the user's fork
+
+- Implementation committed as `5287d9f29eb5301732438e99d8528805fa0c6129` (`feat: add local Codex backend and reviewable file workflow`). The first push to the original repository was rejected because the active GitHub account did not have write access; that attempt changed no upstream refs.
+- The user then supplied `https://github.com/EVENWaterOne/Context-Bridge`. Verified that this is a fork of `ruizewang875-glitch/Context-Bridge`, with write permission for the active account and no existing `feat/local-codex-backend` branch.
+- Local `origin` now points to the user's fork; the original repository is preserved as `upstream`. The publication target is `origin/feat/local-codex-backend`. No source changes or new inference calls were made during this destination correction.
