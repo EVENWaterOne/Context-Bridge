@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Task, Round } from '../src/lib/workflow.ts';
-import type { ChatMessage, Proposal } from '../src/lib/backend-types.ts';
+import { PROVIDER_LABELS, type ChatMessage, type Proposal, type ProviderId } from '../src/lib/backend-types.ts';
 import { hash, filePath } from './store.ts';
 import { decodeText, preserveTextStyle, safeRelative } from './files.ts';
 import { invalid } from './errors.ts';
@@ -39,31 +39,32 @@ export function chatPrompt(serialized: string, question: string, messages: ChatM
   const history = includePrevious ? messages.filter(m => m.status !== 'failed' && m.status !== 'cancelled' && m.status !== 'interrupted').slice(-20) : [];
   return `${instructions}\nAnswer the user's question in their language. This is read-only chat: describe suggested edits and direct the user to Request/Review to generate an applicable proposal; never claim files were changed.\n<context>\n${serialized}\n</context>\n<conversation>\n${JSON.stringify(history.map(m => ({ role:m.role, text:m.text })))}\n</conversation>\n<user_question>${JSON.stringify(question)}</user_question>`;
 }
-export function parseProposal(text: string, task: Task, round: Round, id: string): Proposal {
+export function parseProposal(text: string, task: Task, round: Round, id: string, provider: ProviderId = 'codex'): Proposal {
+  const agent = PROVIDER_LABELS[provider];
   let value: unknown;
-  try { value = JSON.parse(text); } catch { throw invalid('Codex returned incomplete or invalid structured output. Retry the diagnosis.'); }
+  try { value = JSON.parse(text); } catch { throw invalid(`${agent} returned incomplete or invalid structured output. Retry the diagnosis.`); }
   const parsed = diagnosisSchema.safeParse(value);
-  if (!parsed.success) throw invalid(`Codex output did not match the diagnosis contract: ${parsed.error.issues[0]?.message}`);
+  if (!parsed.success) throw invalid(`${agent} output did not match the diagnosis contract: ${parsed.error.issues[0]?.message}`);
   const raw = parsed.data;
   if (raw.outcome === 'needs_information' && (raw.changes.length || !raw.questions.length)) throw invalid('A request for more information must contain questions and no file changes.');
   if (raw.outcome === 'proposal' && !raw.changes.length) throw invalid('A proposal must include a concrete reviewed file change.');
   const paths = new Set<string>();
   const changes = raw.changes.map(change => {
     const path = safeRelative(change.path);
-    if (paths.has(path.toLowerCase())) throw invalid('Codex returned duplicate file changes.');
+    if (paths.has(path.toLowerCase())) throw invalid(`${agent} returned duplicate file changes.`);
     paths.add(path.toLowerCase());
     const file = task.files.find(f => filePath(f) === path && f.includeInContext !== false);
-    if (!file) throw invalid(`Codex proposed changing a file outside the selected context: ${path}`);
+    if (!file) throw invalid(`${agent} proposed changing a file outside the selected context: ${path}`);
     const afterContent = preserveTextStyle(file.content, change.afterContent);
     decodeText(Buffer.from(afterContent));
-    if (file.content === afterContent) throw invalid(`Codex proposed no change to ${path}.`);
+    if (file.content === afterContent) throw invalid(`${agent} proposed no change to ${path}.`);
     return { fileId: file.id, path, beforeHash: hash(file.content), beforeContent: file.content, afterContent };
   });
   return {
-    ...raw, id, version: 2, contextHash: contextHash(task, round), changes,
+    ...raw, id, version: 2, contextHash: contextHash(task, round), changes, provider,
     // Legacy summary fields keep old round exports readable; the v2 review uses changes[].
     parameter: changes.length > 1 ? `${changes.length} files` : 'Code change', before: 'Current file', after: 'Reviewed proposal', unit: '',
     fileName: changes[0]?.path ?? '', codeBefore: changes[0]?.beforeContent ?? '', codeAfter: changes[0]?.afterContent ?? '',
-    confidence: 'Codex analysis · verify on your build', steps: ['Review every file difference.', 'Confirm to apply the reviewed text.', 'Perform your own build or hardware test, then record feedback.'],
+    confidence: `${agent} analysis · verify on your build`, steps: ['Review every file difference.', 'Confirm to apply the reviewed text.', 'Perform your own build or hardware test, then record feedback.'],
   };
 }

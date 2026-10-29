@@ -1,6 +1,6 @@
 import { emptyAssembly, existingArmAssembly, assembledCount, assemblyReady, type HardwareAssembly } from './assembly.ts';
 import { HARDWARE_PROFILE, JOINT_IDS, JOINTS, hardwareDescription, pendingCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
-import type { FileChange } from './backend-types.ts';
+import type { FileChange, ProviderId } from './backend-types.ts';
 /** Browser-local prototype state. No passwords or external service credentials are persisted. */
 export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigating' | 'review' | 'applying' | 'test' | 'feedback';
 export type Issue = 'Too fast' | 'No motion' | 'Wrong way' | 'Shaking' | 'Error message' | 'Other';
@@ -10,7 +10,7 @@ export type Phase = 'Home' | 'Reach' | 'Pause' | 'Return';
 export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits; assembly?: HardwareAssembly }
 export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string; relativePath?: string; linked?: boolean; hash?: string; includeInContext?: boolean }
 export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
-export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string; version?: 2; outcome?: 'proposal' | 'needs_information'; changes?: FileChange[]; questions?: string[]; contextHash?: string }
+export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string; version?: 2; outcome?: 'proposal' | 'needs_information'; changes?: FileChange[]; questions?: string[]; contextHash?: string; provider?: ProviderId }
 export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string; operationId?: string }
 export interface Task { id: string; name: string; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string; rootId?: string; rootPath?: string }
 export interface Workspace { version: 1; tasks: Task[]; activeTaskId: string; stage: Stage }

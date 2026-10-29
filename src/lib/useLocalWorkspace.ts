@@ -56,7 +56,7 @@ export function useLocalWorkspace() {
         const envelope = workspaceResult.value;
         if (envelope.version !== 2 || !envelope.workspace?.tasks?.length) throw new Error('Local workspace unavailable.');
         const service: ServiceStatus = serviceResult.status === 'fulfilled' ? serviceResult.value : {
-          mode: 'local', version: 'unknown', codex: { available: true, authenticated: false, models: [], error: 'Codex status is unavailable. Refresh status or try signing in.' },
+          mode: 'local', version: 'unknown', provider: 'codex', providers: ['codex'], agent: { available: true, authenticated: false, models: [], error: 'AI provider status is unavailable. Refresh status or reconnect.' },
         };
         if (!alive.current || controller.signal.aborted) return;
         queue.current = new WorkspaceSaveQueue(envelope, (state, expectedRevision) => localApi('/api/workspace', { workspace: state, expectedRevision }, { method: 'PUT' }), (canonical, submitted) => {
@@ -67,7 +67,7 @@ export function useLocalWorkspace() {
         if (controller.signal.aborted) return;
         const localHost = ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
         setMode(localHost ? 'unavailable' : 'demo');
-        if (localHost) setError('The local backend is unavailable. Start Context Bridge with npm run dev, then reload. Codex has not been replaced with demo responses.');
+        if (localHost) setError('The local backend is unavailable. Start Context Bridge with npm run dev, then reload. Demo responses are never used in its place.');
       }
     })();
     return () => { alive.current = false; controller.abort(); };
@@ -105,5 +105,5 @@ export function useLocalWorkspace() {
     }
     adopt(envelope); return envelope;
   }, [adopt, keepDraft]);
-  return { workspace, setWorkspace, mode, status, refreshStatus, saving, error, setError, initialJobs, flush, runMutation, reload, recovery };
+  return { workspace, setWorkspace, mode, status, setStatus, refreshStatus, saving, error, setError, initialJobs, flush, runMutation, reload, recovery };
 }
