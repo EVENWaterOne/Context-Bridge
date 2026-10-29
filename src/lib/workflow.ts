@@ -1,5 +1,6 @@
 import { emptyAssembly, existingArmAssembly, assembledCount, assemblyReady, type HardwareAssembly } from './assembly.ts';
 import { HARDWARE_PROFILE, JOINT_IDS, JOINTS, hardwareDescription, pendingCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
+import type { FileChange } from './backend-types.ts';
 /** Browser-local prototype state. No passwords or external service credentials are persisted. */
 export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigating' | 'review' | 'applying' | 'test' | 'feedback';
 export type Issue = 'Too fast' | 'No motion' | 'Wrong way' | 'Shaking' | 'Error message' | 'Other';
@@ -7,11 +8,11 @@ export type Feedback = 'Better' | 'Same' | 'Worse' | 'Not sure';
 export type Joint = HardwareJoint;
 export type Phase = 'Home' | 'Reach' | 'Pause' | 'Return';
 export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits; assembly?: HardwareAssembly }
-export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string }
+export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string; relativePath?: string; linked?: boolean; hash?: string; includeInContext?: boolean }
 export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
-export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string }
-export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string }
-export interface Task { id: string; name: string; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string }
+export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string; version?: 2; outcome?: 'proposal' | 'needs_information'; changes?: FileChange[]; questions?: string[]; contextHash?: string }
+export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string; operationId?: string }
+export interface Task { id: string; name: string; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string; rootId?: string; rootPath?: string }
 export interface Workspace { version: 1; tasks: Task[]; activeTaskId: string; stage: Stage }
 export interface StorageLike { getItem(key: string): string | null; setItem(key: string, value: string): void }
 export const STORAGE_KEY = 'context-bridge.workspace.v1';
@@ -149,9 +150,11 @@ export function completeRound(state: Workspace, result: Feedback, note = ''): Wo
 export function applyRoundChange(state: Workspace): Workspace {
   const task = getActiveTask(state), round = getActiveRound(state), suggestion = round.suggestion;
   if (!suggestion) throw new Error('No suggestion to apply.');
+  if (suggestion.version === 2) throw new Error('Codex changes must be applied by the local backend.');
   if (round.applied) return state;
   const existing = task.files.find(f => f.name === suggestion.fileName);
-  const content = existing ? (existing.content.includes(suggestion.codeBefore) ? existing.content.replace(suggestion.codeBefore, suggestion.codeAfter) : `${existing.content.trimEnd()}\n${suggestion.codeAfter}\n`) : `${suggestion.codeAfter}\n`;
+  if (!existing || !suggestion.codeBefore || existing.content.split(suggestion.codeBefore).length !== 2) throw new Error('The source changed or the proposed text is ambiguous. Investigate again before applying.');
+  const content = existing.content.replace(suggestion.codeBefore, suggestion.codeAfter);
   const file = existing ? { ...existing, content, size: new TextEncoder().encode(content).length, updatedAt: now() } : makeFile(suggestion.fileName, content, 'code', 'generated');
   const files = existing ? task.files.map(f => f.id === file.id ? file : f) : [...task.files, file];
   return updateRound(updateTask(state, { files }), { applied: true });

@@ -1,6 +1,6 @@
 # Context Bridge · BIT
 
-An interactive React + TypeScript + Vite prototype of the Context Bridge light industrial Figma design.
+Context Bridge is a React + TypeScript workbench with a single-user local backend that calls the official Codex app-server. It keeps hardware observations, project files, diagnostic proposals and feedback together. The public Vercel build remains an explicitly labelled browser demonstration.
 
 ## Run
 
@@ -9,17 +9,32 @@ npm ci
 npm run dev
 ```
 
-`npm run build` produces `dist/`. `npm test` runs the workflow and Agent adapter tests.
+Requires Node.js 24.14+ in the Node 24 release line. Development opens at **http://localhost:5173** with the local API on port 4173. For the complete production workbench run `npm run build` followed by `npm start`, then open **http://localhost:4173**. Windows users can double-click `start-local.cmd`.
+
+Open **Connect Codex → Sign in with ChatGPT**, follow the sign-in link and finish the normal login using your own account. This application uses its own `.data/codex` home; credentials are managed by Codex and never sent to the frontend. A compatible Codex entitlement and internet access are required. Model availability comes from the signed-in account. No browser API key is required.
+
+`npm test` runs workflow, API, file-recovery and Codex protocol tests using isolated fixtures, not paid inference. `npm run doctor` checks the installed real Codex process and login state. `npm run dev:demo` explicitly starts the browser-only demonstration. [本机版使用与接口说明](docs/LOCAL_BACKEND.md) explains setup, migration, cancellation, recovery and the API.
+
+## Local backend v2
+
+- Tasks, files, rounds, chats, jobs and original-byte operation backups are persisted in local SQLite under `.data/` (excluded from Git).
+- Import text **copies**, or scan a local project folder and explicitly bind selected **real files**. The UI labels the backing source and lets you exclude individual files from context.
+- Diagnosis and Ask BIT call Codex with selected context only. Diagnosis returns a validated multi-file proposal or questions when information is missing.
+- Review the complete before/after text, then confirm Apply. The backend checks the context and source hashes, writes exactly the reviewed contents, and saves a reversible operation. Neither diagnosis nor chat writes your project.
+- Undo refuses to overwrite later manual changes or a different project binding. Failed multi-file writes are rolled back; interrupted operations are recovered on startup.
+- Motion previews are illustrative. This version does not run project commands, compile/upload firmware, use a serial port or operate hardware.
+
+The service listens only on `127.0.0.1`, with localhost Host/Origin checks and a same-origin session cookie. Keep it local. Do not publish or tunnel this personal backend as a multi-user service.
 
 ## Experience
 
-- Public landing page with BIT and the product slogan; login/registration opens a browser-local demonstration workspace.
+- Public landing page with BIT and the product slogan; demonstration login/registration opens a browser-local workspace. The local backend enters its own saved workbench directly.
 - Hidden task sidebar, task search, round history, new/switch task, and context folders.
 - Guided hardware assembly (category → base → shoulder → forearm → gripper → connection review) → baseline → observe → request → investigation → review → apply → test → feedback.
 - Saving feedback starts the next observation round in the same task. New/switch task enters hardware setup.
 - Files can be imported, previewed, removed, downloaded, and exported with a complete task. The demo accepts code/JSON/log/CSV/text files up to 1 MB each.
-- Applying a suggestion updates the example source file in local state. Undo restores the prior parameter. Real hardware is never contacted.
-- Cancellation stops mock work, and refreshing interrupted work returns to a retryable screen. Workspace data is versioned and persisted in localStorage.
+- Local Apply updates the reviewed task copies or selected real project files; demonstration Apply only updates example browser state. Real hardware is never contacted.
+- Local cancellation interrupts the actual Codex turn; job status and data survive refresh. Demonstration data remains in localStorage; the backend uses a version-2 SQLite envelope around the compatible workspace format.
 
 ## Visual fidelity and motion
 
@@ -70,12 +85,11 @@ The current category is explicitly the owner's four-servo linkage arm, not a gen
 
 ## Agent integration boundary
 
-`src/lib/agent.ts` defines `AgentAdapter`, `AgentContext`, progress and cancellation contracts. The default is `mockAgent`. `createHttpAgent('/api/agent')` is available for a future same-origin authenticated backend:
+`server/` implements the local backend. `src/lib/local-api.ts` provides the same-origin client, serialized revision saves and streaming job adapter. `src/lib/backend-types.ts` is the shared API contract. Local mode uses `/api/agent/investigate`, `/api/agent/chat` and `/api/agent/apply` with server-owned task/round/proposal IDs. The original mock and v1 HTTP adapters remain for explicitly selected demonstrations and compatibility tests; local mode never falls back to mocked responses.
 
-- `POST /api/agent/investigate` → `Suggestion`
-- `POST /api/agent/apply` → `ApplyResult`
+Codex runs through the pinned official npm CLI over stdio, using an isolated home, read-only policy and disabled command/external tools. The adapter rejects unexpected tool or approval events. All project writes go through a separate deterministic, user-confirmed file service. [Official Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
 
-Request body: `{ version: 1, task, round }`. Keep all provider API keys on the server. The frontend does not include or request API keys. This version does not authenticate remote users, synchronize accounts, or communicate with real hardware; the login form only opens the local demo and never persists passwords.
+There is no remote account system or multi-user synchronization. The public demonstration login never authenticates a backend and never persists passwords.
 
 ## Deploy on Vercel
 
