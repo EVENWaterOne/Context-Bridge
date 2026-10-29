@@ -3,7 +3,7 @@ export interface AgentContext { task: Task; round: Round }
 export interface AgentProgress { progress: number; message: string }
 export interface AgentOptions { signal?: AbortSignal; onProgress?: (progress: AgentProgress) => void; durationMs?: number }
 export interface ApplyResult { status: 'applied'; suggestionId: string; changedFiles: string[]; message: string }
-/** Replace this adapter when a server-side Agent connection is available. Never place API secrets in browser code. */
+/** Legacy demonstration adapter. The application uses local-api.ts for real Codex jobs and file operations. */
 export interface AgentAdapter { investigate(context: AgentContext, options?: AgentOptions): Promise<Suggestion>; applySuggestion(context: AgentContext, options?: AgentOptions): Promise<ApplyResult> }
 function abortError() { return new DOMException('Operation cancelled', 'AbortError'); }
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
@@ -61,7 +61,7 @@ export const mockAgent: AgentAdapter = {
     return { status: 'applied', suggestionId: suggestion.id, changedFiles: [suggestion.fileName], message: 'Local example code updated. No physical hardware moved.' };
   },
 };
-/** Explicit opt-in HTTP adapter. The endpoint should be your own authenticated server, which holds secrets. */
+/** Version-one JSON adapter retained for existing integrations; local Codex uses persisted jobs and SSE in local-api.ts. */
 export function createHttpAgent(baseUrl: string, request: typeof fetch = fetch): AgentAdapter {
   if (!baseUrl.startsWith('/') && !/^https:\/\//.test(baseUrl)) throw new Error('Use a same-origin path or an HTTPS Agent endpoint.');
   const call = async <T>(action: string, context: AgentContext, options: AgentOptions = {}): Promise<T> => {
@@ -75,4 +75,5 @@ export function createHttpAgent(baseUrl: string, request: typeof fetch = fetch):
   };
   return { investigate: (context, options) => call<Suggestion>('investigate', context, options), applySuggestion: (context, options) => call<ApplyResult>('apply', context, options) };
 }
+/** @deprecated Demonstration only. App explicitly selects mockAgent only in demo mode. */
 export const agent = mockAgent;
