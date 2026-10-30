@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../../server/app.ts';
+import { ClaudeProvider } from '../../server/claude.ts';
+import { fakeSdk, message } from './claude-sdk.ts';
 import { createExampleWorkspace } from '../../src/lib/workflow.ts';
 import type { CodexProvider, CodexRunRequest } from '../../server/provider.ts';
 
@@ -25,7 +27,13 @@ const provider: CodexProvider = {
   },
   async close() {},
 };
-const app = await createApp({ dataDir: join(directory, 'data'), staticDir: join(root, 'dist'), provider });
+// Claude Code uses the real provider and settings flow with a scripted SDK: no binary, key check or model call.
+const claudeProposal = { outcome: 'proposal', title: 'Review the return duration', summary: 'UI fixture (Claude Code): a reversible single-file change.', rationale: 'Exercise review, explicit Apply, and Undo on an isolated test file.', evidence: ['motion.py: return_duration = 0.6'], questions: [], risk: 'Fixture only; no real inference or hardware test.', changes: [{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }] };
+const claudeSdk = fakeSdk(call => call.options.outputFormat
+  ? [message.init(['StructuredOutput']), message.toolStart(), message.result(JSON.stringify(claudeProposal), { structured_output: claudeProposal })]
+  : [message.init(), message.text('UI fixture (Claude Code): read-only chat. No model or hardware was called.'), message.result('UI fixture (Claude Code): read-only chat. No model or hardware was called.')]);
+const claude = new ClaudeProvider({ dataDir: join(directory, 'data'), query: claudeSdk.query });
+const app = await createApp({ dataDir: join(directory, 'data'), staticDir: join(root, 'dist'), providers: { codex: provider, claude } });
 const state = createExampleWorkspace();
 state.tasks = state.tasks.slice(0,1);
 state.tasks[0].name = 'UI verification fixture';

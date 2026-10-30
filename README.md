@@ -1,6 +1,6 @@
 # Context Bridge · BIT
 
-Context Bridge is a React + TypeScript workbench with a single-user local backend that calls the official Codex app-server. It keeps hardware observations, project files, diagnostic proposals and feedback together. The public Vercel build remains an explicitly labelled browser demonstration.
+Context Bridge is a React + TypeScript workbench with a single-user local backend that calls an AI coding agent: the official Codex app-server by default, or Claude Code through the official Claude Agent SDK. It keeps hardware observations, project files, diagnostic proposals and feedback together. The public Vercel build remains an explicitly labelled browser demonstration.
 
 ## Run
 
@@ -11,15 +11,20 @@ npm run dev
 
 Requires Node.js 24.14+ in the Node 24 release line. Development opens at **http://localhost:5173** with the local API on port 4173. For the complete production workbench run `npm run build` followed by `npm start`, then open **http://localhost:4173**. Windows users can double-click `start-local.cmd`.
 
-Open **Connect Codex → Sign in with ChatGPT**, follow the sign-in link and finish the normal login using your own account. This application uses its own `.data/codex` home; credentials are managed by Codex and never sent to the frontend. A compatible Codex entitlement and internet access are required. Model availability comes from the signed-in account. No browser API key is required.
+Open the connection link in the top banner to choose the AI provider. Diagnosis, review, Apply and Undo work the same way with either one.
 
-`npm test` runs workflow, API, file-recovery and Codex protocol tests using isolated fixtures, not paid inference. `npm run doctor` checks the installed real Codex process and login state. `npm run dev:demo` explicitly starts the browser-only demonstration. [本机版使用与接口说明](docs/LOCAL_BACKEND.md) explains setup, migration, cancellation, recovery and the API.
+- **Connect Codex** (default): choose **Sign in with ChatGPT**, follow the sign-in link and finish the normal login using your own account. This application uses its own `.data/codex` home; credentials are managed by Codex and never sent to the frontend. A compatible Codex entitlement and internet access are required. Model availability comes from the signed-in account.
+- **Connect Claude Code**: paste an [Anthropic API key](https://console.anthropic.com/settings/keys) and save it, or start the service with `ANTHROPIC_API_KEY` set. The key is sent only to the local service, stored in `.data/claude/auth.json` (owner-only on macOS and Linux; on Windows it inherits the data folder's permissions, so keep the data folder inside your user profile) and never shown again. Usage is billed to that key. Claude Code runs from the bundled, pinned Agent SDK with an isolated configuration, no tools and no file access.
+
+The choice is saved in the local database. `BRIDGE_PROVIDER=claude` makes Claude Code the default until someone chooses in the workbench. For personal use on your own computer only, `BRIDGE_CLAUDE_LOCAL_LOGIN=1` adds a **Use local Claude Code login** option that reuses the account already signed in to the `claude` command. Anthropic does not allow Claude subscription logins in products offered to other people, so it is off by default and shared or hosted setups should use an API key.
+
+`npm test` runs workflow, API, file-recovery, Codex protocol and Claude Code tests using isolated fixtures and a local stand-in for the Anthropic API, not paid inference. `npm run doctor` checks the installed real Codex and Claude Code processes and their login state without calling a model. `npm run dev:demo` explicitly starts the browser-only demonstration. [本机版使用与接口说明](docs/LOCAL_BACKEND.md) explains setup, migration, cancellation, recovery and the API.
 
 ## Local backend v2
 
 - Tasks, files, rounds, chats, jobs and original-byte operation backups are persisted in local SQLite under `.data/` (excluded from Git).
 - Import text **copies**, or scan a local project folder and explicitly bind selected **real files**. The UI labels the backing source and lets you exclude individual files from context.
-- Diagnosis and Ask BIT call Codex with selected context only. Diagnosis returns a validated multi-file proposal or questions when information is missing.
+- Diagnosis and Ask BIT call the connected provider (Codex or Claude Code) with selected context only. Diagnosis returns a validated multi-file proposal or questions when information is missing.
 - Review the complete before/after text, then confirm Apply. The backend checks the context and source hashes, writes exactly the reviewed contents, and saves a reversible operation. Neither diagnosis nor chat writes your project.
 - Undo refuses to overwrite later manual changes or a different project binding. Failed multi-file writes are rolled back; interrupted operations are recovered on startup.
 - Motion previews are illustrative. This version does not run project commands, compile/upload firmware, use a serial port or operate hardware.
@@ -34,7 +39,7 @@ The service listens only on `127.0.0.1`, with localhost Host/Origin checks and a
 - Saving feedback starts the next observation round in the same task. New/switch task enters hardware setup.
 - Files can be imported, previewed, removed, downloaded, and exported with a complete task. The demo accepts code/JSON/log/CSV/text files up to 1 MB each.
 - Local Apply updates the reviewed task copies or selected real project files; demonstration Apply only updates example browser state. Real hardware is never contacted.
-- Local cancellation interrupts the actual Codex turn; job status and data survive refresh. Demonstration data remains in localStorage; the backend uses a version-2 SQLite envelope around the compatible workspace format.
+- Local cancellation interrupts the actual Codex turn or Claude Code process; job status and data survive refresh. Demonstration data remains in localStorage; the backend uses a version-2 SQLite envelope around the compatible workspace format.
 
 ## Visual fidelity and motion
 
@@ -88,6 +93,8 @@ The current category is explicitly the owner's four-servo linkage arm, not a gen
 `server/` implements the local backend. `src/lib/local-api.ts` provides the same-origin client, serialized revision saves and streaming job adapter. `src/lib/backend-types.ts` is the shared API contract. Local mode uses `/api/agent/investigate`, `/api/agent/chat` and `/api/agent/apply` with server-owned task/round/proposal IDs. The original mock and v1 HTTP adapters remain for explicitly selected demonstrations and compatibility tests; local mode never falls back to mocked responses.
 
 Codex runs through the pinned official npm CLI over stdio, using an isolated home, read-only policy and disabled command/external tools. The adapter rejects unexpected tool or approval events. All project writes go through a separate deterministic, user-confirmed file service. [Official Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
+
+Claude Code runs through the pinned official `@anthropic-ai/claude-agent-sdk` (`server/claude.ts`). Every request disables built-in tools, MCP servers, plugins, settings files, session persistence and `@file` expansion, and uses its own system prompt. Only the structured-output tool is offered when a schema is needed. The adapter checks the reported tools and permission mode, stops on any other tool call, fails within seconds on rejected credentials or billing errors instead of retrying for minutes, turns off Claude Code's refusal retry and fallback model so a declined request is sent once and never answered by a model the user did not choose, and cancels by aborting the process. Inherited `ANTHROPIC_*`/`CLAUDE_*` variables are removed except a few connection settings (Git Bash path, client certificate, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`); API-key mode also uses an isolated `CLAUDE_CONFIG_DIR`, and local-login mode keeps an inherited `CLAUDE_CONFIG_DIR`. Claude Code always adds a short environment note to each request (its working folder, platform, shell, OS version and the date) that a custom system prompt cannot remove; the adapter runs it in an empty temporary folder, which also holds Claude Code's own scratch files and is removed on shutdown, so project and data paths stay out of that note. Requests carry the provider shown on the page, and the service refuses one that another window has since switched away from. Both adapters implement the same `CodexProvider` interface, so jobs, proposals, review, Apply and Undo are shared. [Claude Agent SDK documentation](https://code.claude.com/docs/en/agent-sdk/overview).
 
 There is no remote account system or multi-user synchronization. The public demonstration login never authenticates a backend and never persists passwords.
 

@@ -20,7 +20,7 @@ export class Store {
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, 'bridge.sqlite'));
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS roots (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, path TEXT NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS imports (source TEXT PRIMARY KEY);');
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS roots (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, path TEXT NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS imports (source TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
     this.db.exec('PRAGMA synchronous=FULL;');
     if (!this.db.prepare('SELECT id FROM settings WHERE id=1').get()) this.db.prepare('INSERT INTO settings VALUES(1,0,?)').run(JSON.stringify(createInitialWorkspace()));
     for (const j of this.jobs()) if (j.status === 'running') this.saveJob({ ...j, status: 'interrupted', message: 'Local service restarted. Retry this request.', error: 'Service restarted before the turn finished.' });
@@ -114,5 +114,7 @@ export class Store {
   operation(id: string): OperationRecord { const row = this.db.prepare('SELECT value FROM operations WHERE id=?').get(id); if (!row) throw missing('File operation not found.'); return JSON.parse(String(row.value)); }
   operationByKey(key: string): OperationRecord | undefined { const row = this.db.prepare('SELECT value FROM operations WHERE key=?').get(key); return row ? JSON.parse(String(row.value)) : undefined; }
   operations(): OperationRecord[] { return this.db.prepare('SELECT value FROM operations').all().map(row => JSON.parse(String(row.value))); }
+  preference(key: string): string | undefined { const row = this.db.prepare('SELECT value FROM preferences WHERE key=?').get(key); return row ? String(row.value) : undefined; }
+  setPreference(key: string, value: string): void { this.db.prepare('INSERT INTO preferences VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
   close(): void { this.db.close(); }
 }

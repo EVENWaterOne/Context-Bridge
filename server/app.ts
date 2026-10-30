@@ -4,6 +4,9 @@ import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { CodexProvider } from './provider.ts';
+import type { ProviderId } from '../src/lib/backend-types.ts';
+import { ProviderSwitch, isProviderId, type ProviderFactory } from './providers.ts';
+import { ClaudeProvider } from './claude.ts';
 import { Store } from './store.ts';
 import { FileService } from './files.ts';
 import { Jobs } from './jobs.ts';
@@ -11,7 +14,14 @@ import { BridgeError, conflict, invalid, missing } from './errors.ts';
 
 export interface AppOptions {
   dataDir: string;
+  /** Test seam: a fixed Codex provider. */
   provider?: CodexProvider;
+  /** Test seam: fixed providers by ID; only these can be selected. */
+  providers?: Partial<Record<ProviderId, CodexProvider>>;
+  /** Provider used until the user chooses one in the workbench (BRIDGE_PROVIDER). Codex if unset. */
+  defaultProvider?: ProviderId;
+  /** Claude Code options from the service environment. */
+  claude?: { apiKey?: string; allowLocalLogin?: boolean };
   staticDir?: string;
   fileFault?: (phase: 'after-write', index: number) => void;
   timeoutMs?: number;
@@ -21,7 +31,15 @@ export async function createApp(options: AppOptions) {
   mkdirSync(dataDir, { recursive: true });
   const store = new Store(dataDir), files = new FileService(store, options.fileFault);
   files.recover();
-  const provider = options.provider ?? new (await import('./codex.ts')).LocalCodexProvider({ dataDir });
+  const fixed = options.providers ?? (options.provider ? { codex: options.provider } : undefined);
+  const factories: Partial<Record<ProviderId, ProviderFactory>> = fixed
+    ? Object.fromEntries(Object.entries(fixed).map(([id, instance]) => [id, () => instance]))
+    : {
+      codex: async () => new (await import('./codex.ts')).LocalCodexProvider({ dataDir }),
+      claude: () => new ClaudeProvider({ dataDir, environmentApiKey: options.claude?.apiKey, allowLocalLogin: options.claude?.allowLocalLogin }),
+    };
+  const saved = store.preference('provider');
+  const provider = new ProviderSwitch(factories, isProviderId(saved) ? saved : options.defaultProvider ?? 'codex');
   const jobs = new Jobs(store, files, provider, dataDir, options.timeoutMs);
   const app = Fastify({ bodyLimit: 16 * 1024 * 1024, logger: false });
   const session = randomBytes(32).toString('hex');
@@ -64,6 +82,12 @@ export async function createApp(options: AppOptions) {
   };
   const str = (value: unknown, name: string, max = 500): string => { if (typeof value !== 'string' || !value.trim() || value.length > max) throw invalid(`${name} is required.`); return value; };
   const params = (value: unknown) => value as Record<string, string>;
+  /** The provider the page showed when the user sent the request. Pages from before Claude Code support only knew Codex. */
+  const expected = (value: unknown): ProviderId => {
+    if (value === undefined) return 'codex';
+    if (!isProviderId(value)) throw invalid('Choose an available AI provider.');
+    return value;
+  };
   app.get('/api/workspace', async () => store.envelope());
   app.put('/api/workspace', async request => {
     const b = body(request.body);
@@ -74,8 +98,26 @@ export async function createApp(options: AppOptions) {
     const b = body(request.body);
     return store.import({ ...b, sourceId: str(b.sourceId, 'sourceId', 300) } as Parameters<Store['import']>[0]);
   });
-  app.get('/api/status', async () => ({ mode: 'local', version: '2.0.0', codex: await provider.status(), recovery: store.operations().filter(o => o.state === 'recovery_required').map(o => ({ operationId: o.id, message: o.error })) }));
-  app.post('/api/codex/login', async () => provider.login());
+  const serviceStatus = async () => ({ mode: 'local', version: '2.0.0', provider: provider.active, providers: provider.ids, agent: await provider.status(), recovery: store.operations().filter(o => o.state === 'recovery_required').map(o => ({ operationId: o.id, message: o.error })) });
+  app.get('/api/status', serviceStatus);
+  app.post('/api/agent/provider', async request => {
+    const b = body(request.body);
+    if (jobs.controllers.size) throw conflict(`${provider.label} is working. Stop or finish the current request before switching providers.`);
+    // Saved before switching, so a failed write never leaves the service on an unsaved choice.
+    const id = provider.check(b.provider);
+    store.setPreference('provider', id);
+    provider.select(id);
+    return serviceStatus();
+  });
+  app.post('/api/codex/login', async () => (await provider.provider('codex')).login());
+  const claude = async () => {
+    const instance = await provider.provider('claude');
+    if (!(instance instanceof ClaudeProvider)) throw invalid('Claude Code settings are not available in this service.');
+    return instance;
+  };
+  app.put('/api/claude/api-key', async request => { (await claude()).saveApiKey(body(request.body).apiKey); return serviceStatus(); });
+  app.delete('/api/claude/api-key', async () => { (await claude()).removeApiKey(); return serviceStatus(); });
+  app.put('/api/claude/auth-method', async request => { (await claude()).setAuthMethod(body(request.body).method); return serviceStatus(); });
   app.get('/api/tasks/:id/messages', async request => store.messages(params(request.params).id));
   app.post('/api/tasks/:id/project/scan', async request => files.scan(params(request.params).id, str(body(request.body).path, 'An absolute project folder', 4096)));
   app.post('/api/tasks/:id/project/bind', async request => {
@@ -86,11 +128,11 @@ export async function createApp(options: AppOptions) {
   app.post('/api/tasks/:id/project/refresh', async request => files.refresh(params(request.params).id));
   app.post('/api/agent/investigate', async (request, reply) => {
     const b = body(request.body);
-    return reply.code(202).send(jobs.start('investigate', str(b.taskId,'taskId'), str(b.roundId,'roundId'), undefined, b.model === undefined ? undefined : str(b.model,'model')));
+    return reply.code(202).send(jobs.start('investigate', str(b.taskId,'taskId'), str(b.roundId,'roundId'), undefined, b.model === undefined ? undefined : str(b.model,'model'), expected(b.provider)));
   });
   app.post('/api/agent/chat', async (request, reply) => {
     const b = body(request.body);
-    return reply.code(202).send(jobs.start('chat', str(b.taskId,'taskId'), undefined, str(b.message,'message',20000), b.model === undefined ? undefined : str(b.model,'model')));
+    return reply.code(202).send(jobs.start('chat', str(b.taskId,'taskId'), undefined, str(b.message,'message',20000), b.model === undefined ? undefined : str(b.model,'model'), expected(b.provider)));
   });
   app.get('/api/jobs/:id', async request => store.job(params(request.params).id));
   app.post('/api/jobs/:id/cancel', async request => jobs.cancel(params(request.params).id));
@@ -130,5 +172,5 @@ export async function createApp(options: AppOptions) {
   // cannot hold shutdown open until the model timeout.
   app.addHook('preClose', async () => { await jobs.close(); });
   app.addHook('onClose', async () => { store.close(); });
-  return app as typeof app & { bridge: { store: Store; files: FileService; jobs: Jobs; provider: CodexProvider } };
+  return app as typeof app & { bridge: { store: Store; files: FileService; jobs: Jobs; provider: ProviderSwitch } };
 }

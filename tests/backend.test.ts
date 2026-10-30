@@ -4,10 +4,12 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:
 import { join, dirname, resolve, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { createApp } from '../server/app.ts';
+import { createApp, type AppOptions } from '../server/app.ts';
+import { ClaudeProvider } from '../server/claude.ts';
+import { fakeSdk, message } from './fixtures/claude-sdk.ts';
 import type { CodexProvider, CodexRunRequest, CodexRunResult } from '../server/provider.ts';
 import type { Store, OperationRecord } from '../server/store.ts';
-import type { ApplyResponse, JobView, ProjectScan, Proposal, WorkspaceEnvelope } from '../src/lib/backend-types.ts';
+import type { ApplyResponse, JobView, ProjectScan, Proposal, ServiceStatus, WorkspaceEnvelope } from '../src/lib/backend-types.ts';
 import { makeFile, newRound, type Task } from '../src/lib/workflow.ts';
 
 const origin = 'http://localhost:4173';
@@ -61,10 +63,13 @@ class FakeProvider implements CodexProvider {
   }
 }
 
-async function harness(t: TestContext, provider = new FakeProvider(), options: { fileFault?: (phase: 'after-write', index: number) => void } = {}) {
+type HarnessOptions = Omit<AppOptions, 'dataDir'>;
+/** Options may be a function, so each restart can get new provider instances like a real restart. */
+async function harness(t: TestContext, provider = new FakeProvider(), options: HarnessOptions | (() => HarnessOptions) = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'context-bridge-test-'));
   const dataDir = join(directory, 'data');
-  let app = await createApp({ dataDir, provider, ...options });
+  const current = () => typeof options === 'function' ? options() : options;
+  let app = await createApp({ dataDir, provider, ...current() });
   let cookie = '';
   t.after(async () => {
     await app.close();
@@ -83,7 +88,7 @@ async function harness(t: TestContext, provider = new FakeProvider(), options: {
     return response.json() as WorkspaceEnvelope;
   }
   await session();
-  const api = (method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown) => app.inject({
+  const api = (method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: unknown) => app.inject({
     method, url, headers: { host: 'localhost:4173', origin, cookie },
     ...(payload === undefined ? {} : { payload: payload as object }),
   });
@@ -138,7 +143,7 @@ async function harness(t: TestContext, provider = new FakeProvider(), options: {
   }
   return { directory, dataDir, provider, api, workspace, seed, terminal, investigate, apply, bind,
     get app() { return app; }, get cookie() { return cookie; },
-    async restart() { await app.close(); app = await createApp({ dataDir, provider, ...options }); await session(); },
+    async restart() { await app.close(); app = await createApp({ dataDir, provider, ...current() }); await session(); },
   };
 }
 
@@ -701,4 +706,143 @@ test('undo recovery retains its rollback direction when an external edit delays 
   const current = (await h.workspace()).workspace.tasks[0];
   assert.equal(current.rounds.find(round => round.id === linked.task.activeRoundId)?.applied, true);
   assert.equal(current.files.find(file => file.relativePath === 'first.py')?.content, 'duration = 1.2\n');
+});
+
+const CLAUDE_KEY = 'sk-ant-api03-backend-test-key-0123456789-wxyz';
+async function claudeHarness(t: TestContext, options: HarnessOptions = {}) {
+  const codex = new FakeProvider();
+  const proposal = { outcome: 'proposal', title: 'Make the return gentler', summary: 'Increase the return duration.', rationale: 'Reversible experiment.', evidence: ['motion.py: return_duration'], questions: [], risk: 'Verify on hardware.', changes: [{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }] };
+  const sdk = fakeSdk(call => call.options.outputFormat
+    ? [message.init(['StructuredOutput']), message.toolUse('StructuredOutput', proposal), message.result(JSON.stringify(proposal), { structured_output: proposal })]
+    : [message.init(), message.text('Claude explains the change.'), message.result('Claude explains the change.')]);
+  const directory = await mkdtemp(join(tmpdir(), 'context-bridge-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  // Closing the app closes its providers, so each start builds a new one over the same saved settings.
+  const h = await harness(t, codex, () => ({ providers: { codex, claude: new ClaudeProvider({ dataDir: join(directory, 'claude-provider'), query: sdk.query }) }, ...options }));
+  return { ...h, codex, sdk };
+}
+
+test('Codex stays the default provider and Claude Code can be selected, configured and remembered', async t => {
+  const h = await claudeHarness(t);
+  let status = (await h.api('GET', '/api/status')).json() as ServiceStatus;
+  assert.equal(status.provider, 'codex');
+  assert.deepEqual(status.providers, ['codex', 'claude']);
+  assert.equal(status.agent.account?.type, 'chatgpt');
+  const switched = await h.api('POST', '/api/agent/provider', { provider: 'claude' });
+  assert.equal(switched.statusCode, 200, switched.body);
+  status = switched.json() as ServiceStatus;
+  assert.equal(status.provider, 'claude');
+  assert.equal(status.agent.authenticated, false);
+  assert.deepEqual(status.agent.claude, { method: 'api_key', apiKey: null, localLoginAllowed: false });
+  const saved = await h.api('PUT', '/api/claude/api-key', { apiKey: CLAUDE_KEY });
+  assert.equal(saved.statusCode, 200, saved.body);
+  assert.ok(!saved.body.includes(CLAUDE_KEY.slice(12)), 'The API response never echoes the key');
+  assert.equal((saved.json() as ServiceStatus).agent.authenticated, true);
+  assert.deepEqual((saved.json() as ServiceStatus).agent.claude?.apiKey, { source: 'saved', hint: 'sk-ant-…wxyz' });
+  await h.restart();
+  assert.equal(((await h.api('GET', '/api/status')).json() as ServiceStatus).provider, 'claude', 'The choice survives a restart');
+  const kept = ((await h.api('GET', '/api/status')).json() as ServiceStatus).agent;
+  assert.equal(kept.authenticated, true, 'The saved key survives a restart');
+  const removed = await h.api('DELETE', '/api/claude/api-key');
+  assert.equal(removed.statusCode, 200, removed.body);
+  const after = (removed.json() as ServiceStatus).agent;
+  assert.equal(after.available, true, after.error);
+  assert.equal(after.authenticated, false);
+  assert.equal(after.claude?.apiKey, null);
+  const back = await h.api('POST', '/api/agent/provider', { provider: 'codex' });
+  assert.equal((back.json() as ServiceStatus).provider, 'codex');
+  for (const provider of ['openai', '', 42]) assert.equal((await h.api('POST', '/api/agent/provider', { provider })).statusCode, 400);
+});
+
+test('BRIDGE_PROVIDER chooses the starting provider until the user picks one', async t => {
+  const h = await claudeHarness(t, { defaultProvider: 'claude' });
+  assert.equal(((await h.api('GET', '/api/status')).json() as ServiceStatus).provider, 'claude');
+  await h.api('POST', '/api/agent/provider', { provider: 'codex' });
+  await h.restart();
+  assert.equal(((await h.api('GET', '/api/status')).json() as ServiceStatus).provider, 'codex', 'A saved choice wins over the default');
+});
+
+test('Claude Code shares the diagnose, review, apply and undo flow', async t => {
+  const h = await claudeHarness(t);
+  await h.api('POST', '/api/agent/provider', { provider: 'claude' });
+  const task = await h.seed();
+  const blocked = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, provider: 'claude' });
+  assert.equal(blocked.statusCode, 202, blocked.body);
+  const unauthenticated = await h.terminal((blocked.json() as JobView).id);
+  assert.equal(unauthenticated.status, 'failed');
+  assert.match(String(unauthenticated.error), /Connect Claude Code/);
+  await h.api('PUT', '/api/claude/api-key', { apiKey: CLAUDE_KEY });
+  const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, model: 'opus', provider: 'claude' });
+  const job = await h.terminal((response.json() as JobView).id);
+  assert.equal(job.status, 'completed', JSON.stringify(job));
+  assert.equal(job.provider, 'claude');
+  const proposal = job.result as Proposal;
+  assert.equal(proposal.provider, 'claude');
+  assert.equal(proposal.confidence, 'Claude Code analysis · verify on your build');
+  assert.equal(h.codex.requests.length, 0, 'Codex is not called while Claude Code is selected');
+  const run = h.sdk.runs().at(-1)!;
+  assert.equal(run.options.model, 'opus');
+  assert.match(String(run.prompt), /return_duration = 0\.6/, 'The selected context travels in the prompt');
+  const applied = await h.apply(task, proposal);
+  assert.equal(applied.statusCode, 200, applied.body);
+  const operationId = (applied.json() as ApplyResponse).operationId;
+  assert.equal((await h.workspace()).workspace.tasks[0].files[0].content, 'return_duration = 1.2\n');
+  const undone = await h.api('POST', `/api/operations/${operationId}/undo`, { idempotencyKey: 'undo-claude' });
+  assert.equal(undone.statusCode, 200, undone.body);
+  assert.equal((await h.workspace()).workspace.tasks[0].files[0].content, 'return_duration = 0.6\n');
+  const chat = await h.api('POST', '/api/agent/chat', { taskId: task.id, message: 'Why this change?', provider: 'claude' });
+  const reply = await h.terminal((chat.json() as JobView).id);
+  assert.equal(reply.status, 'completed', JSON.stringify(reply));
+  assert.equal(reply.text, 'Claude explains the change.');
+});
+
+test('a request from a window that still shows the old provider is refused', async t => {
+  const h = await claudeHarness(t);
+  const task = await h.seed();
+  await h.api('POST', '/api/agent/provider', { provider: 'claude' });
+  for (const [url, payload] of [
+    ['/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, model: 'codex-model', provider: 'codex' }],
+    ['/api/agent/chat', { taskId: task.id, message: 'Why this change?', provider: 'codex' }],
+    // A page loaded before Claude Code support sends no provider; it only knew Codex.
+    ['/api/agent/chat', { taskId: task.id, message: 'Why this change?' }],
+  ] as const) {
+    const refused = await h.api('POST', url, payload);
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal((refused.json() as { error: { code: string } }).error.code, 'PROVIDER_CHANGED');
+    assert.match(refused.body, /changed to Claude Code in another window/);
+  }
+  assert.equal(h.sdk.runs().length + h.codex.requests.length, 0, 'Neither provider receives the context');
+  assert.deepEqual(await (await h.api('GET', `/api/tasks/${task.id}/messages`)).json(), [], 'The refused chat message is not stored');
+  assert.equal((await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, provider: 'gemini' })).statusCode, 400);
+  await h.api('PUT', '/api/claude/api-key', { apiKey: CLAUDE_KEY });
+  const accepted = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, provider: 'claude' });
+  assert.equal(accepted.statusCode, 202, accepted.body);
+  assert.equal((await h.terminal((accepted.json() as JobView).id)).status, 'completed');
+});
+
+test('the provider cannot be switched while a request is running', async t => {
+  const h = await claudeHarness(t);
+  h.codex.block = true;
+  const task = await h.seed();
+  const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId });
+  const id = (response.json() as JobView).id;
+  const refused = await h.api('POST', '/api/agent/provider', { provider: 'claude' });
+  assert.equal(refused.statusCode, 409, refused.body);
+  assert.match(refused.body, /Codex is working/);
+  await h.api('POST', `/api/jobs/${id}/cancel`);
+  assert.equal((await h.terminal(id)).status, 'cancelled');
+  assert.equal((await h.api('POST', '/api/agent/provider', { provider: 'claude' })).statusCode, 200);
+});
+
+test('Claude Code settings are guarded like every other local API mutation', async t => {
+  const h = await claudeHarness(t);
+  const remote = await h.app.inject({ method: 'PUT', url: '/api/claude/api-key', headers: { host: 'localhost:4173', origin: 'https://attacker.example', cookie: h.cookie }, payload: { apiKey: CLAUDE_KEY } });
+  assert.equal(remote.statusCode, 403, remote.body);
+  const noSession = await h.app.inject({ method: 'PUT', url: '/api/claude/api-key', headers: { host: 'localhost:4173', origin }, payload: { apiKey: CLAUDE_KEY } });
+  assert.equal(noSession.statusCode, 401, noSession.body);
+  const local = await h.api('PUT', '/api/claude/auth-method', { method: 'local_login' });
+  assert.equal(local.statusCode, 403, local.body);
+  assert.match(local.body, /personal use only/);
+  const codexOnly = await harness(t);
+  assert.equal((await codexOnly.api('PUT', '/api/claude/api-key', { apiKey: CLAUDE_KEY })).statusCode, 400, 'A service without Claude Code rejects its settings');
 });

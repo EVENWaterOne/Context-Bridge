@@ -20,3 +20,16 @@ The manual browser fixture is `tests/fixtures/ui-server.ts`, uses an explicitly 
 On Windows, file-system tests require ordinary host permissions for atomic replacement and junction checks. Restricted sandbox EPERM results were verified as environment restrictions, then the full suite was run successfully with host permissions. No tests were skipped, and safe file operations were retained.
 
 The pinned Node 24.14 runtime emits an experimental warning for its built-in SQLite module. The production build also reports the pre-existing large Three.js scene chunk. Neither warning is a failed check. The dependency installation's final audit reports zero vulnerabilities.
+
+## Claude Code provider — 2026-10-29
+
+| Boundary | Result | Evidence |
+| --- | --- | --- |
+| Frontend/backend compile | Passed | `npm run build` |
+| Automated tests | Passed | `npm test`: 133 passed, zero failures/skips |
+| Provider switch and shared flow | Passed with scripted SDK | Diagnose → review → Apply → Undo → chat through Claude Code; switch refused while a job runs; choice survives restart |
+| Credential handling | Passed | Key never returned; mode 0600 on macOS/Linux (Windows inherits the data folder ACL); subscription/admin tokens refused; local login 403 unless `BRIDGE_CLAUDE_LOCAL_LOGIN=1` |
+| Stale window | Passed | A request naming a provider another window switched away from gets 409 `PROVIDER_CHANGED`; neither provider receives the context |
+| Real Claude Code binary | Passed without inference | `tests/claude-binary.test.ts` against a local mock Messages API, with non-essential traffic enabled (telemetry off) and every other connection refused by a local proxy: no tools, no `@file` read, data path absent, exactly one request (a mutation run without `title` fails), a refusal sent once with no retry or fallback model (fails without the switches), 401 failure within seconds, cancel |
+| Browser → API → UI | Passed with test provider | Fixture on port 4175: provider choice, key save, model list, review label, mobile layout |
+| Real Anthropic inference | Not performed | No Anthropic account or real key was used |
