@@ -118,3 +118,24 @@ A second, independent check confirmed each fix (mutation runs fail the new tests
 - `tests/claude-binary.test.ts` runs the real bundled Claude Code binary against a local stand-in for the Messages API with a fake key: exactly one model request, `x-api-key` only, `tools: []`, the system prompt present, an `@path` mention passed verbatim without reading the file, no data-folder path in the request, schema output through StructuredOutput, a refusal sent once with Claude's explanation, a 401 failing in seconds, and cancel ending the process.
 - Browser QA on the test-only fixture (port 4175): switching providers, refusing a subscription token, saving a key (input cleared, hint only), per-provider models, banner and review labels, desktop and mobile layout.
 - No Anthropic account, real API key or network inference was used. Real Claude Code inference will be confirmed by the first request after a key is added.
+
+## 2026-10-30 — Arduino Uno controller
+
+The owner's arm now runs on an Arduino Uno (four SG90s on D9–D12, sketch `Arduino_Uno_Arm_Test.ino`). Setup and the diagnosis context assumed ESP32, so they were adapted.
+
+### Implemented
+
+- Setup offers **Arduino Uno (ATmega328P)**. The existing `Arduino` value is kept and labelled "Arduino (other board)", so saved tasks still match an option.
+- `hardwareDescription()` adds `controllerProfile` for Arduino Uno: ATmega328P at 16 MHz and 5 V, 32256 bytes for sketches, 2048 bytes SRAM, FQBN `arduino:avr:uno`, pin roles (D0/D1 shared with USB serial, 10-bit A0–A5), and notes on `analogWrite` frequency, the Servo library's Timer1 conflict on D9/D10, 16-bit `int`, auto-reset when the serial port opens and the USB current limit. It describes the board, never the owner's wiring or calibration. Other controllers get no profile rather than guessed facts.
+- The pin hint follows the controller (`e.g. D9`, `e.g. GPIO 18`, `e.g. PA8`; `e.g. D9 or GPIO 18` before one is chosen).
+- The duplicate-pin check treats `GPIO 18`/`IO18`/`18` as one pin and `D9`/`Pin 9`/`9` as another; `A0` and `PA8` keep their letters.
+
+### Verification evidence
+
+- `npm test`: 135 passed (2 new). The new pin test fails against the previous pin normalization. `npm run build` and `git diff --check` passed.
+- Browser on the local service (port 4173): created the task "Arduino Uno 整臂" with D9/D10/D11/D12; `9` for the shoulder was rejected as a duplicate of D9; the hint changed to `e.g. D9` after choosing Arduino Uno; the generated `context-bridge-hardware.json` carries the Uno profile with calibration still pending. Linked `Arduino_Uno_Arm_Test` (`.ino`, `README.md`, `serial_test.py`) as real files.
+- Not run: a diagnosis or Ask BIT request with the new context, which would use the signed-in Codex account.
+
+### Known issue, not changed
+
+- Creating a task requests `/api/tasks/:id/messages` before the workspace save lands, so the page shows "Task not found." once (404). The task itself saves normally.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Vector3 } from 'three';
 import { ARM_DIMENSIONS as d, hardwareMotion, linkagePose } from '../src/components/hardwareKinematics.ts';
 import { createRobotModel } from '../src/components/RobotScene.ts';
-import { pendingCalibration, servoCommand, hardwareDescription } from '../src/lib/hardware.ts';
+import { pendingCalibration, pinPlaceholder, servoCommand, hardwareDescription } from '../src/lib/hardware.ts';
 import { createExampleWorkspace, loadWorkspace, getActiveTask, makeFile, updateHardware } from '../src/lib/workflow.ts';
 const distance=(a:{x:number;y:number},b:{x:number;y:number})=>Math.hypot(a.x-b.x,a.y-b.y);
 const near=(a:number,b:number)=>assert.ok(Math.abs(a-b)<1e-9,`${a} != ${b}`);
@@ -58,4 +58,13 @@ test('controller changes update generated context while retaining user hardware 
  const task=getActiveTask(updateHardware(initial,{controller:'STM32F103C8T6'}));
  assert.equal(JSON.parse(task.files.find(f=>f.name==='hardware.json')!.content).controller,task.hardware.controller);
  assert.deepEqual(task.files.find(f=>f.id===userFile.id),userFile);
+});
+test('choosing Arduino Uno puts its board facts in the generated context without inventing calibration',()=>{
+ const task=getActiveTask(updateHardware(createExampleWorkspace(),{controller:'Arduino Uno'}));
+ const context=JSON.parse(task.files.find(f=>f.name==='hardware.json')!.content);
+ assert.equal(context.controller,'Arduino Uno');assert.equal(context.controllerProfile.mcu,'ATmega328P');assert.equal(context.controllerProfile.fqbn,'arduino:avr:uno');
+ assert.match(context.controllerProfile.pins.serial,/D0.*D1/);assert.deepEqual(context.servoCalibration,pendingCalibration());
+ assert.equal(hardwareDescription('ESP32').controllerProfile,undefined);
+ assert.equal(JSON.parse(getActiveTask(updateHardware(createExampleWorkspace(),{controller:'ESP32'})).files.find(f=>f.name==='hardware.json')!.content).controllerProfile,undefined);
+ assert.equal(pinPlaceholder('Arduino Uno'),'e.g. D9');assert.equal(pinPlaceholder('ESP32'),'e.g. GPIO 18');assert.equal(pinPlaceholder(''),'e.g. D9 or GPIO 18');
 });

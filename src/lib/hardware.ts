@@ -26,9 +26,30 @@ export function servoCommand(joint: HardwareJoint, relativeDegrees: number, limi
   const requested = calibration.zero + calibration.direction * relativeDegrees;
   return Math.max(calibration.min, Math.min(calibration.max, requested));
 }
+/** Published board facts for diagnosis. They describe the board, never the owner's wiring or measurements. */
+const CONTROLLER_PROFILES: Partial<Record<string, { board: string; mcu: string; clockMHz: number; logicVoltage: number; sketchFlashBytes: number; sramBytes: number; eepromBytes: number; firmware: string; fqbn: string; pins: Record<string, string>; notes: string[] }>> = {
+  'Arduino Uno': {
+    board: 'Arduino Uno R3', mcu: 'ATmega328P', clockMHz: 16, logicVoltage: 5, sketchFlashBytes: 32256, sramBytes: 2048, eepromBytes: 1024,
+    firmware: 'Arduino sketch (.ino, C++) on the AVR core', fqbn: 'arduino:avr:uno',
+    pins: { digital: 'D0–D13', analog: 'A0–A5, 10-bit analogRead (0–1023)', analogWrite: 'D3, D5, D6, D9, D10, D11', serial: 'D0 RX / D1 TX, shared with USB serial' },
+    notes: [
+      'analogWrite() runs at about 490 Hz (980 Hz on D5/D6); it is not a 50 Hz servo signal. Servos need the Servo library or a timer.',
+      'The Servo library uses Timer1 and disables analogWrite() on D9 and D10.',
+      'int is 16-bit and double is 32-bit on AVR, unlike ESP32 and STM32.',
+      'Opening the serial port resets the board, so the sketch restarts when a serial monitor connects.',
+      'The USB fuse limits supply to about 500 mA; servos under load need an external 5 V supply sharing GND with the board.',
+    ],
+  },
+};
+export function pinPlaceholder(controller: string) {
+  if (/^arduino/i.test(controller)) return 'e.g. D9';
+  if (/^stm32/i.test(controller)) return 'e.g. PA8';
+  if (/esp32/i.test(controller)) return 'e.g. GPIO 18';
+  return 'e.g. D9 or GPIO 18';
+}
 export function hardwareDescription(controller = 'ESP32') {
   return {
-    profile: HARDWARE_PROFILE, controller, servo: 'SG90', servoCount: 4,
+    profile: HARDWARE_PROFILE, controller, controllerProfile: CONTROLLER_PROFILES[controller], servo: 'SG90', servoCount: 4,
     armDOF: 3, gripperDOF: 1, independentWrist: false,
     axes: JOINTS, servoCalibration: pendingCalibration(),
     specification: { homeSizeCm: [18,9.5,18], maximumExtendedLengthCm: 25, weightG: 160, clawOpeningClaimDeg: 180 },

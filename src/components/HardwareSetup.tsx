@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import {Robot} from './Robot';
-import {JOINT_IDS,JOINTS,pendingCalibration,type HardwareJoint} from '../lib/hardware';
+import {JOINT_IDS,JOINTS,pendingCalibration,pinPlaceholder,type HardwareJoint} from '../lib/hardware';
 import {assembledCount,existingArmAssembly,parseServoDraft,servoDraft,type HardwareAssembly,type ServoDraft} from '../lib/assembly';
 import type {Hardware,Task} from '../lib/workflow';
 import './HardwareSetup.css';
@@ -65,7 +65,7 @@ export function HardwareSetup({task,onChange,onName,onFinish,onFiles,onLeave}:Pr
           <p className="muted part-description">{partCopy[joint].description}</p>
           <div className="part-parameter-fields">
             <label>Servo model<input maxLength={60} required value={draft.model} onChange={event=>patchDraft({model:event.target.value})} placeholder="e.g. SG90"/></label>
-            <label>Control pin / channel <span className="optional">Optional</span><input maxLength={30} value={draft.pin} onChange={event=>patchDraft({pin:event.target.value})} placeholder="e.g. GPIO 18"/></label>
+            <label>Control pin / channel <span className="optional">Optional</span><input maxLength={30} value={draft.pin} onChange={event=>patchDraft({pin:event.target.value})} placeholder={pinPlaceholder(task.hardware.controller)}/></label>
           </div>
           <div className="servo-limit-section">
             <label className="limit-toggle"><input type="checkbox" aria-label="Enter measured angle limits" checked={draft.calibrate} onChange={event=>patchDraft({calibrate:event.target.checked})}/><span>Enter measured angle limits</span><small>{draft.calibrate?'Set now':'Optional'}</small></label>
@@ -79,7 +79,7 @@ export function HardwareSetup({task,onChange,onName,onFinish,onFiles,onLeave}:Pr
         </>:<>
           <p className="muted">Check the parts, then choose how your controller connects.</p>
           <div className="assembly-review" aria-label="Configured servos">{JOINT_IDS.map(id=><div key={id}><span className="mono">{id}</span><div><strong>{JOINTS[id].name} <span>· {assembly.parts[id]?.model}</span></strong><small>{assembly.parts[id]?.pin||'Pin not set'} · {calibration[id]?`${calibration[id]!.min}–${calibration[id]!.max}°`:'Limits pending'}</small></div><button type="button" className="text-button" onClick={()=>setStep(JOINT_IDS.indexOf(id)+1)} aria-label={`Edit ${JOINTS[id].name}`}>Edit</button></div>)}</div>
-          <div className="connection-fields"><label>Controller<select required value={task.hardware.controller} onChange={event=>onChange({controller:event.target.value})}><option value="" disabled>Choose controller</option><option>ESP32</option><option>STM32F103C8T6</option><option>Arduino</option><option>Raspberry Pi + ESP32</option><option>Other</option></select></label><label>Connection<select required value={task.hardware.connection} onChange={event=>onChange({connection:event.target.value})}><option value="" disabled>Choose connection</option><option>USB serial · 115200 baud</option><option>Wi-Fi</option><option>Bluetooth</option></select></label></div>
+          <div className="connection-fields"><label>Controller<select required value={task.hardware.controller} onChange={event=>onChange({controller:event.target.value})}><option value="" disabled>Choose controller</option><option>ESP32</option><option>STM32F103C8T6</option><option value="Arduino Uno">Arduino Uno (ATmega328P)</option><option value="Arduino">Arduino (other board)</option><option>Raspberry Pi + ESP32</option><option>Other</option></select></label><label>Connection<select required value={task.hardware.connection} onChange={event=>onChange({connection:event.target.value})}><option value="" disabled>Choose connection</option><option>USB serial · 115200 baud</option><option>Wi-Fi</option><option>Bluetooth</option></select></label></div>
           <details className="setup-context"><summary>Task & project files <span>{task.files.length} files</span></summary><label>Task name<input required value={task.name} onChange={event=>onName(event.target.value)}/></label><button type="button" className="button" onClick={onFiles}>{task.files.length?'View project files':'Add project files'}</button></details>
           <p className="fine">Unmeasured angles stay pending. The next step is a simulated first run.</p>
         </>}
