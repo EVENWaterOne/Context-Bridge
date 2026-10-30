@@ -28,6 +28,12 @@ test('servo forms reject reused channels and incomplete or inverted calibration 
   assert.deepEqual(parsed,{part:{model:'SG90',pin:'19'},calibration:{min:25,max:140,zero:80,direction:-1}});
   assert.deepEqual(parseServoDraft(servoDraft(),'J2',assembly),{part:{model:'SG90',pin:''},calibration:null});
 });
+test('pin names from Arduino and ESP32 boards collide only when they name the same pin',()=>{
+  const assembly={...emptyAssembly(),category:'robot-arm' as const,parts:{J1:{model:'SG90',pin:'D9'},J2:{model:'SG90',pin:'IO18'},J3:{model:'SG90',pin:'A0'}}};
+  for(const pin of ['9','d9','Pin 9','D 9','GPIO 18','18'])assert.ok('error' in parseServoDraft({...servoDraft(),pin},'J4',assembly),pin);
+  for(const pin of ['D10','A1','D0','PA8','19'])assert.ok(!('error' in parseServoDraft({...servoDraft(),pin},'J4',assembly)),pin);
+  assert.ok(!('error' in parseServoDraft({...servoDraft(),pin:'D9'},'J1',assembly)));
+});
 test('completed assembly generates actual hardware context and preserves uploaded files and existing tasks',()=>{
   const initial=createInitialWorkspace();let state=createTask(initial,'New build');
   const assembly={...emptyAssembly(),category:'robot-arm' as const,step:5,parts:Object.fromEntries(JOINT_IDS.map((id,i)=>[id,{model:i===3?'MG90S':'SG90',pin:String(18+i)}]))};
