@@ -11,6 +11,17 @@ export interface FileChange {
   beforeContent: string;
   afterContent: string;
 }
+/**
+ * A check the local service ran on a proposed file before review. It parses the proposed text
+ * only; project code is never executed.
+ */
+export interface FileCheck {
+  path: string;
+  /** What was checked, for example "Python syntax". */
+  check: string;
+  status: 'passed' | 'failed' | 'skipped';
+  detail?: string;
+}
 export interface Proposal extends Suggestion {
   version: 2;
   outcome: 'proposal' | 'needs_information';
@@ -18,6 +29,7 @@ export interface Proposal extends Suggestion {
   questions: string[];
   contextHash: string;
   provider?: ProviderId;
+  checks?: FileCheck[];
 }
 export interface ChatMessage {
   id: string;

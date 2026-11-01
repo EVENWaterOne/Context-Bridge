@@ -64,9 +64,11 @@ export class Store {
       const contextChanged = JSON.stringify(files) !== JSON.stringify(previous.files) || JSON.stringify(t.hardware) !== JSON.stringify(previous.hardware);
       const rounds = t.rounds.map(r => {
         const old = previous.rounds.find(p => p.id === r.id);
-        if (!old) return { ...r, applied: false, suggestion: undefined, operationId: undefined };
+        if (!old) return { ...r, applied: false, suggestion: undefined, operationId: undefined, clarifications: undefined };
         const changed = contextChanged || JSON.stringify(r.observation) !== JSON.stringify(old.observation);
-        return { ...r, applied: old.applied, operationId: old.operationId, suggestion: old.applied || !changed ? old.suggestion : undefined };
+        // Questions and answers are recorded by the service with each diagnosis. They outlive a revised
+        // observation, so a later diagnosis in this round still knows what the user already answered.
+        return { ...r, applied: old.applied, operationId: old.operationId, suggestion: old.applied || !changed ? old.suggestion : undefined, clarifications: old.clarifications };
       });
       return { ...t, rootId: previous.rootId, rootPath: previous.rootPath, files, rounds };
     });

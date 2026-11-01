@@ -35,10 +35,12 @@
 - **绑定工程**：打开 Files → Link local project，输入本机绝对目录，扫描并勾选具体文件，确认绑定。页面标出真实根目录；确认 Apply 会写回这些真实文件。
 - 勾选文件才会进入上下文。默认跳过凭证名称、依赖、构建目录、二进制、链接、超过 1 MB 或非 UTF-8 文件。可选文件总量最多 200 个、上下文最多 6 MB；总工作区最多 12 MB。
 - 文件按相对路径区分，同名的 `src/config.py` 和 `tests/config.py` 可以同时使用。目录穿越、盘符注入、junction/符号链接越界会被拒绝。
-- 完成硬件信息、记录观察，然后发送诊断。结果可能是多文件修改提案，也可能要求补充资料。打开差异逐项审阅；只有点击确认 Apply 才会修改。
+- 完成硬件信息、记录观察，然后发送诊断。默认结果是多文件修改提案：只要观察和代码指向一个可能的原因，BIT 就给出最小、可撤销的修改，并在说明和风险里写明不确定的地方，因为 Apply 之后你在实物上的测试本身就是验证。只有真正卡住时才提问（没有选中相关代码、需要上下文里没有的舵机限位或引脚等物理数值、观察与代码互相矛盾），每次最多三个问题。打开差异逐项审阅；只有点击确认 Apply 才会修改。
+- BIT 提问时，直接在 Review 页的 **Your answers** 里回答并点 **Send answers to BIT**；答不上来就留空，点 **Propose without answering**，BIT 会用现有信息给出一个可撤销的测试修改。回答由服务端保存在本轮，之后本轮的每次诊断都会带上，修改观察后也不会丢；浏览器不能改写这些记录。
+- 提案进入 Review 前，服务会对修改后的 JSON、JavaScript（`node --check`）和 Python（`ast.parse`）文件做语法检查，只解析文本，不运行工程代码。修改后的文件没通过、而原文件能通过时，服务把错误发回模型修正一次；仍不通过的会在 Review 里标红显示。其他类型（如 `.ino`、`.cpp`、`.ts`）标为未检查。没有安装 Python 时，Python 文件标为未检查。
 - Apply 会检查所有选中的工程上下文及目标文件版本，保留 UTF-8 BOM/CRLF，存原始字节备份，再替换文件。外部文件已修改时先 Refresh from disk，再重新诊断。
 - Undo 检查文件仍处于刚应用后的版本；后续手动编辑、任务重新绑定工程都会阻止不安全撤销。已完成轮次不能重新 Apply。新轮次需新诊断。
-- Ask BIT 按任务保存会话。聊天只解释、不写文件；需要修改时走诊断和 Review。关闭“使用历史”会排除先前轮次和聊天上下文，使用新的 Codex thread 或 Claude Code 会话，避免旧内容暗中进入请求。
+- Ask BIT 按任务保存会话。聊天只解释、不写文件；需要修改时走诊断和 Review。开启“使用历史”（默认）时，聊天里说过的内容也会带进下一次诊断，不用再重复。关闭“使用历史”会排除先前轮次和聊天上下文，使用新的 Codex thread 或 Claude Code 会话，避免旧内容暗中进入请求。
 
 机械臂动画只展示流程，不执行修改后的代码。第一版没有 shell、编译、烧录、串口控制或物理测试；反馈由使用者根据实际观察填写，界面不会把动画播放当作验证通过。
 
@@ -69,7 +71,7 @@
 | `POST /api/tasks/:id/project/scan` | `{path}` → 根目录 ID、文件清单、跳过原因 |
 | `POST /api/tasks/:id/project/bind` | `{rootId,paths}` → 权威工作区 |
 | `POST /api/tasks/:id/project/refresh` | 从已绑定的实际文件更新快照 |
-| `POST /api/agent/investigate` | `{taskId,roundId,model?,provider?}` → 202 job；`provider` 与当前不符时 409 `PROVIDER_CHANGED`，省略时按 `codex`（旧页面只认识 Codex） |
+| `POST /api/agent/investigate` | `{taskId,roundId,model?,provider?,answer?,proceed?}` → 202 job；`answer`（最多 20,000 字）是对上次问题的回答，保存进本轮 `clarifications`；`proceed:true` 要求不再追问、直接给出尽力而为的提案；`provider` 与当前不符时 409 `PROVIDER_CHANGED`，省略时按 `codex`（旧页面只认识 Codex） |
 | `POST /api/agent/chat` | `{taskId,message,model?,provider?}` → 202 job；同上 |
 | `GET /api/tasks/:id/messages` | 当前任务持久化聊天 |
 | `GET /api/jobs/:id` | 已持久化的任务状态 |
@@ -78,7 +80,7 @@
 | `POST /api/agent/apply` | `{taskId,roundId,suggestionId,idempotencyKey}` → 操作 ID、变更文件、权威工作区 |
 | `POST /api/operations/:id/undo` | `{idempotencyKey}` → 撤销结果和权威工作区 |
 
-错误统一为 `{error:{code,message}}`。诊断结果区分 `proposal` 和 `needs_information`；提案中 `changes[]` 的前置哈希和原文由后端生成，模型只能给选定现有路径的完整修改后文本。Apply 不接受客户端传入的任意补丁，也不会再次调用模型生成。
+错误统一为 `{error:{code,message}}`。诊断结果区分 `proposal` 和 `needs_information`；提案中 `changes[]` 的前置哈希和原文由后端生成，模型只能给选定现有路径的完整修改后文本（模型多写的 `files/`、`./` 前缀或反斜杠只在已选文件列表里查找，未修改的文件会被丢弃）。模型给出了具体修改时一律作为提案供审阅，附带的问题作为测试时的注意事项显示；没有具体修改的结果必须带问题。提案带 `checks[]`，记录每个文件的自动检查结果（`passed`/`failed`/`skipped`）。Apply 不接受客户端传入的任意补丁，也不会再次调用模型生成。
 
 ## 验证
 

@@ -311,6 +311,158 @@ test('missing-information results are reviewable but cannot be applied', async t
   assert.equal((await h.workspace()).workspace.tasks[0].files[0].content, 'return_duration = 0.6\n');
 });
 
+const question = (text: string) => JSON.stringify({ outcome: 'needs_information', title: 'One detail first', summary: 'A single answer decides the change.', rationale: 'Two causes fit the observation.', evidence: [], questions: [text], risk: 'None yet.', changes: [] });
+const currentRound = async (h: Awaited<ReturnType<typeof harness>>, task: Task) => (await h.workspace()).workspace.tasks.find(item => item.id === task.id)!.rounds.find(item => item.id === task.activeRoundId)!;
+async function investigateWith(h: Awaited<ReturnType<typeof harness>>, task: Task, extra: Record<string, unknown>) {
+  const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, ...extra });
+  assert.equal(response.statusCode, 202, response.body);
+  const job = await h.terminal((response.json() as JobView).id);
+  assert.equal(job.status, 'completed', JSON.stringify(job));
+  return job.result as Proposal;
+}
+
+test('the diagnosis prompt makes a reversible proposal the default and names the real blockers', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  await h.investigate(task);
+  const prompt = h.provider.requests[0].prompt;
+  assert.match(prompt, /outcome=proposal is the default/);
+  assert.match(prompt, /that test is the verification/);
+  assert.match(prompt, /Missing servo calibration \(null limits\) is normal and is not a blocker/);
+  assert.match(prompt, /Never repeat a question/);
+  assert.doesNotMatch(prompt, /ask for missing evidence/i, 'The old rule sent every uncertain diagnosis back as a question');
+  assert.doesNotMatch(prompt, /continue without answering/, 'Best effort is only requested when the user asks for it');
+});
+
+test('answers to BIT questions are saved with the round, reach the next diagnosis and keep the proposal applicable', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.replies.push(question('QUESTION_SENTINEL: does J2 stop at the end of the return?'));
+  assert.equal((await h.investigate(task)).outcome, 'needs_information');
+  let round = await currentRound(h, task);
+  assert.deepEqual(round.clarifications?.map(item => [item.questions, item.answer]), [[['QUESTION_SENTINEL: does J2 stop at the end of the return?'], undefined]]);
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  const proposal = await investigateWith(h, task, { answer: '  ANSWER_SENTINEL: it stops, but it slams into place  ' });
+  assert.equal(proposal.outcome, 'proposal');
+  assert.ok(h.provider.requests[1].prompt.includes('QUESTION_SENTINEL'), 'The next diagnosis sees what it asked');
+  assert.ok(h.provider.requests[1].prompt.includes('ANSWER_SENTINEL: it stops, but it slams into place'), 'The next diagnosis sees the answer');
+  round = await currentRound(h, task);
+  assert.equal(round.clarifications?.length, 1);
+  assert.equal(round.clarifications?.[0].answer, 'ANSWER_SENTINEL: it stops, but it slams into place');
+  assert.ok(round.clarifications?.[0].answeredAt);
+  // The answer is part of the reviewed context, so the proposal made with it can be applied.
+  const applied = await h.apply(task, proposal);
+  assert.equal(applied.statusCode, 200, applied.body);
+  assert.equal((applied.json() as ApplyResponse).workspace.tasks[0].files[0].content, 'return_duration = 1.2\n');
+});
+
+test('revising the observation keeps earlier answers, and the browser cannot rewrite them', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.replies.push(question('QUESTION_SENTINEL: is the arm loaded?'));
+  await h.investigate(task);
+  h.provider.replies.push(question('Second question'));
+  await investigateWith(h, task, { answer: 'ANSWER_SENTINEL: no load' });
+  const envelope = await h.workspace();
+  const state = structuredClone(envelope.workspace);
+  const round = state.tasks[0].rounds.find(item => item.id === task.activeRoundId)!;
+  round.observation.detail = 'Revised: the return overshoots, then settles.';
+  round.clarifications = [{ questions: ['FORGED_QUESTION'], answer: 'FORGED_ANSWER' }];
+  const saved = await h.api('PUT', '/api/workspace', { workspace: state, expectedRevision: envelope.revision });
+  assert.equal(saved.statusCode, 200, saved.body);
+  const kept = await currentRound(h, task);
+  assert.equal(kept.observation.detail, 'Revised: the return overshoots, then settles.');
+  assert.deepEqual(kept.clarifications?.map(item => [item.questions, item.answer]), [[['QUESTION_SENTINEL: is the arm loaded?'], 'ANSWER_SENTINEL: no load'], [['Second question'], undefined]]);
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  await h.investigate(task);
+  const prompt = h.provider.requests[2].prompt;
+  assert.ok(prompt.includes('ANSWER_SENTINEL: no load') && prompt.includes('Revised: the return overshoots'));
+  assert.ok(!prompt.includes('FORGED_ANSWER'));
+});
+
+test('a user who cannot answer can ask for a best-effort proposal; malformed answers are refused', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.replies.push(question('What are the servo limits?'));
+  await h.investigate(task);
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  const proposal = await investigateWith(h, task, { proceed: true });
+  assert.equal(proposal.outcome, 'proposal');
+  assert.match(h.provider.requests[1].prompt, /The user chose to continue without answering more questions/);
+  for (const extra of [{ proceed: 'yes' }, { answer: 42 }, { answer: 'x'.repeat(20001) }]) {
+    const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId, ...extra });
+    assert.equal(response.statusCode, 400, response.body);
+  }
+  assert.equal(h.provider.requests.length, 2);
+});
+
+test('the Ask BIT conversation reaches the next diagnosis only when the round includes history', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.replies.push('BIT: thanks, that servo is slow under load.');
+  const chat = await h.api('POST', '/api/agent/chat', { taskId: task.id, message: 'CHAT_SENTINEL: the servo is an MG90S and the arm carries a 50 g block' });
+  assert.equal(chat.statusCode, 202, chat.body);
+  assert.equal((await h.terminal((chat.json() as JobView).id)).status, 'completed');
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  await h.investigate(task);
+  assert.ok(h.provider.requests[1].prompt.includes('CHAT_SENTINEL'), 'What the user said in chat is not lost');
+  const envelope = await h.workspace();
+  const state = structuredClone(envelope.workspace);
+  state.tasks[0].rounds.find(item => item.id === task.activeRoundId)!.observation.includePrevious = false;
+  assert.equal((await h.api('PUT', '/api/workspace', { workspace: state, expectedRevision: envelope.revision })).statusCode, 200);
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  await h.investigate(task);
+  assert.ok(!h.provider.requests[2].prompt.includes('CHAT_SENTINEL'), '"This round only" excludes the conversation');
+});
+
+test('a proposal that fails the automatic check is sent back once with the error and corrected before review', async t => {
+  const h = await harness(t);
+  const task = await h.seed([makeFile('config.json', '{"return_duration": 0.6}\n', 'hardware')]);
+  h.provider.proposal([{ path: 'config.json', afterContent: '{"return_duration": 1.2,}\n' }]);
+  h.provider.proposal([{ path: 'config.json', afterContent: '{"return_duration": 1.2}\n' }]);
+  const proposal = await h.investigate(task);
+  assert.equal(h.provider.requests.length, 2);
+  const retry = h.provider.requests[1].prompt;
+  assert.match(retry, /<automatic_check_failures>/);
+  assert.ok(retry.includes('{\\"return_duration\\": 1.2,}'), 'The correction request quotes the previous answer');
+  assert.equal(proposal.changes[0].afterContent, '{"return_duration": 1.2}\n');
+  assert.deepEqual(proposal.checks?.map(check => [check.path, check.check, check.status]), [['config.json', 'JSON syntax', 'passed']]);
+  assert.deepEqual((await currentRound(h, task)).suggestion?.checks, proposal.checks, 'Review shows the checks after a reload');
+});
+
+test('a proposal that still fails, or whose correction fails, is kept with the failed check shown', async t => {
+  const h = await harness(t);
+  const task = await h.seed([makeFile('config.json', '{"return_duration": 0.6}\n', 'hardware')]);
+  h.provider.proposal([{ path: 'config.json', afterContent: '{"return_duration": 1.2,}\n' }]);
+  h.provider.proposal([{ path: 'config.json', afterContent: '{"return_duration": 1.3,}\n' }]);
+  let proposal = await h.investigate(task);
+  assert.equal(h.provider.requests.length, 2, 'Only one correction is attempted');
+  assert.equal(proposal.checks?.[0].status, 'failed');
+  assert.ok(proposal.checks?.[0].detail);
+  const run = h.provider.run.bind(h.provider);
+  let calls = 0;
+  h.provider.run = async request => { if (++calls === 2) throw new Error('Provider unavailable during correction'); return run(request); };
+  h.provider.proposal([{ path: 'config.json', afterContent: '{"return_duration": 1.4,}\n' }]);
+  proposal = await h.investigate(task);
+  assert.equal(proposal.changes[0].afterContent, '{"return_duration": 1.4,}\n');
+  assert.equal(proposal.checks?.[0].status, 'failed');
+});
+
+test('path spellings, unchanged files and a mislabelled outcome do not discard a usable proposal', async t => {
+  const h = await harness(t);
+  const task = await h.seed([makeFile('motion.py', 'return_duration = 0.6\n', 'code'), makeFile('notes.md', 'keep\n', 'note')]);
+  h.provider.replies.push(JSON.stringify({ outcome: 'needs_information', title: 'Try a slower return', summary: '', rationale: '', evidence: [], questions: ['Does it still slam after the change?'], risk: '', changes: [{ path: 'files/motion.py', afterContent: 'return_duration = 1.2\n' }, { path: './notes.md', afterContent: 'keep\n' }] }));
+  let proposal = await h.investigate(task);
+  assert.equal(proposal.outcome, 'proposal', 'A concrete change is reviewable even when the model also asked something');
+  assert.deepEqual(proposal.changes.map(change => change.path), ['motion.py']);
+  assert.deepEqual(proposal.questions, ['Does it still slam after the change?']);
+  h.provider.replies.push(JSON.stringify({ outcome: 'proposal', title: 'Nothing to change', summary: '', rationale: '', evidence: [], questions: ['Which phase feels abrupt?'], risk: '', changes: [{ path: 'motion.py', afterContent: 'return_duration = 0.6\n' }] }));
+  proposal = await h.investigate(task);
+  assert.equal(proposal.outcome, 'needs_information');
+  assert.equal(proposal.changes.length, 0);
+});
+
 test('linked projects keep same basenames distinct and modify only the reviewed selected file', async t => {
   const h = await harness(t);
   const root = join(h.directory, 'project');
@@ -497,7 +649,7 @@ test('a late diagnosis cannot overwrite a newer observation', async t => {
 test('model output cannot target an unchecked file or a path outside the context', async t => {
   const h = await harness(t);
   const task = await h.seed([makeFile('motion.py', 'return_duration = 0.6\n', 'code'), { ...makeFile('private.py', 'secret = True\n', 'code'), includeInContext: false }]);
-  for (const path of ['private.py', '../outside.py']) {
+  for (const path of ['private.py', '../outside.py', 'files/private.py', 'files/../motion.py', './../motion.py']) {
     h.provider.proposal([{ path, afterContent: 'overwritten = True\n' }]);
     const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId });
     assert.equal(response.statusCode, 202, response.body);

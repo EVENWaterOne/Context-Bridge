@@ -33,3 +33,16 @@ The pinned Node 24.14 runtime emits an experimental warning for its built-in SQL
 | Real Claude Code binary | Passed without inference | `tests/claude-binary.test.ts` against a local mock Messages API, with non-essential traffic enabled (telemetry off) and every other connection refused by a local proxy: no tools, no `@file` read, data path absent, exactly one request (a mutation run without `title` fails), a refusal sent once with no retry or fallback model (fails without the switches), 401 failure within seconds, cancel |
 | Browser → API → UI | Passed with test provider | Fixture on port 4175: provider choice, key save, model list, review label, mobile layout |
 | Real Anthropic inference | Not performed | No Anthropic account or real key was used |
+
+## Diagnosis that moves forward — 2026-11-01
+
+| Boundary | Result | Evidence |
+| --- | --- | --- |
+| Automated tests | Passed | `npm test`: 147 passed, zero failures/skips (Node 22.23 in the build container) |
+| Prompt | Passed | The diagnosis prompt makes a reversible proposal the default, names the three blockers and no longer says "ask for missing evidence" |
+| Answers → next diagnosis | Passed | Question recorded with the round; the answer reaches the next prompt; the resulting proposal applies; a revised observation keeps answers; browser saves cannot rewrite them |
+| Conversation → diagnosis | Passed | Ask BIT text reaches the diagnosis with history on, never with "This round only" |
+| Automatic checks | Passed | JSON, `node --check` and Python `ast.parse` report errors with line numbers; nothing is executed (marker file test); an already-broken file is not blamed; a missing Python is reported |
+| Check → correction | Passed with fake provider | A failing file is sent back once with the error; the corrected proposal shows "passed"; a second failure or a failed correction keeps the first proposal with the failure shown |
+| Browser → API → UI | Passed with test provider | Fixture with `UI_FIXTURE_QUESTIONS=1`: answer flow and "Propose without answering", desktop and 390 px |
+| Real model inference | Not performed | No real Codex or Anthropic account was used |
