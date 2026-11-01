@@ -9,9 +9,10 @@ import type { FileCheck } from '../src/lib/backend-types.ts';
  *
  * The model cannot run anything, so without these checks a proposal with a typo reached
  * the user, and the model had no way to learn that its change did not even parse. Each
- * check only parses text: JSON in this process, JavaScript with `node --check` and Python
- * with `ast.parse`. Neither imports nor executes the project, and both run in an empty
- * temporary folder with a minimal environment and a time limit.
+ * check only parses text: JSON and the bracket balance of C/C++ (Arduino) files in this
+ * process, JavaScript with `node --check` and Python with `ast.parse`. Neither child process
+ * imports or executes the project; both run in an empty temporary folder with a minimal
+ * environment and a time limit.
  */
 const TIMEOUT_MS = 10_000;
 const MAX_DETAIL = 600;
@@ -121,9 +122,47 @@ const pythonChecker = (candidates?: [string, string[]][]): Checker => ({
   }),
 });
 
+/**
+ * C and C++ cannot be compiled here without the user's toolchain and board headers. Unbalanced
+ * braces, parentheses or brackets still catch the most common slip in a full-file replacement:
+ * a file cut off or a block left open. Comments, strings and character literals are skipped.
+ */
+const brackets: Checker = {
+  label: 'Bracket balance',
+  async run(text) {
+    const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+    const stack: { char: string; line: number }[] = [];
+    let line = 1;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i], next = text[i + 1];
+      if (char === '\n') { line++; continue; }
+      if (char === '/' && next === '/') { while (i < text.length && text[i] !== '\n') i++; i--; continue; }
+      if (char === '/' && next === '*') {
+        const end = text.indexOf('*/', i + 2);
+        const stop = end < 0 ? text.length : end + 2;
+        for (let j = i; j < stop; j++) if (text[j] === '\n') line++;
+        i = stop - 1; continue;
+      }
+      if (char === '"' || char === "'") {
+        for (i++; i < text.length && text[i] !== char && text[i] !== '\n'; i++) if (text[i] === '\\') i++;
+        if (text[i] === '\n') line++;
+        continue;
+      }
+      if (char === '(' || char === '[' || char === '{') stack.push({ char, line });
+      else if (pairs[char]) {
+        const open = stack.pop();
+        if (!open || open.char !== pairs[char]) return { status: 'failed', detail: `Unexpected '${char}' (line ${line})` };
+      }
+    }
+    const open = stack.pop();
+    return open ? { status: 'failed', detail: `'${open.char}' opened on line ${open.line} is never closed` } : { status: 'passed' };
+  },
+};
+
 function checkerFor(path: string, options: CheckOptions): Checker | undefined {
   const extension = extname(path).toLowerCase();
   if (extension === '.json') return json;
+  if (['.ino', '.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp'].includes(extension)) return brackets;
   if (['.js', '.mjs', '.cjs'].includes(extension)) return javascript(extension);
   if (extension === '.py') return pythonChecker(options.pythonCandidates);
   return undefined;
@@ -141,9 +180,15 @@ export async function checkChanges(changes: { path: string; beforeContent: strin
     const checker = checkerFor(change.path, options);
     if (!checker) { checks.push({ path: change.path, check: 'Not checked', status: 'skipped', detail: 'There is no automatic check for this file type. Test it on your build.' }); continue; }
     const strip = (text: string) => text.replace(/^\ufeff/, '');
-    const after = await checker.run(strip(change.afterContent), change.path, signal);
+    // The checks are advisory: a temporary-folder or process problem marks the file as not checked
+    // instead of failing the diagnosis. Only cancellation stops them.
+    const run = async (text: string): Promise<Outcome> => {
+      try { return await checker.run(strip(text), change.path, signal); }
+      catch (error) { if (signal.aborted) throw error; return { status: 'unavailable', detail: 'The automatic check could not run on this computer.' }; }
+    };
+    const after = await run(change.afterContent);
     if (after.status === 'failed') {
-      const before = await checker.run(strip(change.beforeContent), change.path, signal);
+      const before = await run(change.beforeContent);
       if (before.status !== 'passed') { checks.push({ path: change.path, check: checker.label, status: 'skipped', detail: 'The current file does not pass this check either, so the proposal was not judged by it.' }); continue; }
     }
     checks.push(after.status === 'passed'

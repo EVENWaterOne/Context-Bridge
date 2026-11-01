@@ -55,11 +55,30 @@ test('a file that never passed the check is not blamed on the proposal', async (
 
 test('file types without a parser are listed as not checked; a BOM is not an error', async () => {
   const checks = await checkChanges([
-    change('arm.ino', 'void loop() {\n', 'void loop() {}\n'),
+    change('motion.ts', 'const speed: number = (;\n', 'const speed: number = 1;\n'),
     change('hardware.json', '\ufeff{"joints": 3}\n', '\ufeff{"joints": 4}\n'),
   ], live());
-  assert.deepEqual(checks.map(check => [check.path, check.status]), [['arm.ino', 'skipped'], ['hardware.json', 'passed']]);
+  assert.deepEqual(checks.map(check => [check.path, check.status]), [['motion.ts', 'skipped'], ['hardware.json', 'passed']]);
   assert.match(checks[0].detail ?? '', /no automatic check/i);
+});
+
+test('C/C++ firmware gets a bracket-balance check that ignores comments, strings and characters', async () => {
+  const before = 'void loop() {\n  servo.write(90);\n}\n';
+  const checks = await checkChanges([
+    change('arm.ino', 'void loop() {\n  Serial.println("}{ )");  // }\n  char open = \'{\';\n  /* { */\n  servo.write(120);\n}\n', before),
+    change('src/arm.cpp', 'void loop() {\n  servo.write(120);\n', before),
+    change('include/arm.h', 'int angles[3] = {0, 90, 180);\n', 'int angles[3] = {0, 90, 180};\n'),
+    change('legacy.c', '#if A\nvoid f() {\n#else\nvoid f() {\n#endif\n}\n', '#if A\nvoid f() {\n#else\nvoid g() {\n#endif\n}\n'),
+  ], live());
+  assert.deepEqual(checks.map(check => [check.path, check.check, check.status]), [
+    ['arm.ino', 'Bracket balance', 'passed'],
+    ['src/arm.cpp', 'Bracket balance', 'failed'],
+    ['include/arm.h', 'Bracket balance', 'failed'],
+    // Preprocessor branches can unbalance a file that compiles; it is not blamed on the proposal.
+    ['legacy.c', 'Bracket balance', 'skipped'],
+  ]);
+  assert.equal(checks[1].detail, "'{' opened on line 1 is never closed");
+  assert.equal(checks[2].detail, "Unexpected ')' (line 1)");
 });
 
 test('a missing Python or a stand-in that is not Python is reported as not checked', async () => {

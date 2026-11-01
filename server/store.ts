@@ -76,8 +76,9 @@ export class Store {
     for (const op of this.operations()) if (['prepared','applying','undoing','recovery_required'].includes(op.state) && !tasks.some(t => t.id === op.taskId)) throw conflict('Resolve the pending file operation before removing its task.');
     return this.mutate(() => ({ ...incoming, tasks }));
   }
+  /** Imported or browser-created tasks carry no server-owned records: bindings, reviewed proposals or recorded answers. */
   stripBinding(t: Task): Task {
-    return { ...t, rootId: undefined, rootPath: undefined, files: t.files.map(f => ({ ...f, linked: false, hash: hash(f.content) })), rounds: t.rounds.map(r => ({ ...r, operationId: undefined, suggestion: r.suggestion?.version === 2 ? undefined : r.suggestion, applied: !!r.completedAt && r.applied })) };
+    return { ...t, rootId: undefined, rootPath: undefined, files: t.files.map(f => ({ ...f, linked: false, hash: hash(f.content) })), rounds: t.rounds.map(r => ({ ...r, operationId: undefined, suggestion: r.suggestion?.version === 2 ? undefined : r.suggestion, applied: !!r.completedAt && r.applied, clarifications: undefined })) };
   }
   import(value: { task?: Task; workspace?: Workspace; sourceId: string }): WorkspaceEnvelope {
     if (!value.sourceId || value.sourceId.length > 300) throw invalid('An import source ID is required.');

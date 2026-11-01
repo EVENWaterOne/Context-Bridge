@@ -38,11 +38,11 @@ The pinned Node 24.14 runtime emits an experimental warning for its built-in SQL
 
 | Boundary | Result | Evidence |
 | --- | --- | --- |
-| Automated tests | Passed | `npm test`: 147 passed, zero failures/skips (Node 22.23 in the build container) |
+| Automated tests | Passed | `npm test`: 152 passed, zero failures/skips (Node 22.23 in the build container) |
 | Prompt | Passed | The diagnosis prompt makes a reversible proposal the default, names the three blockers and no longer says "ask for missing evidence" |
-| Answers → next diagnosis | Passed | Question recorded with the round; the answer reaches the next prompt; the resulting proposal applies; a revised observation keeps answers; browser saves cannot rewrite them |
+| Answers → next diagnosis | Passed | Question recorded with the round; the answer reaches the next prompt and the next round; the resulting proposal applies; a revised observation keeps answers; browser saves and imports cannot plant them; a repeated answer is recorded once; at most 20 question sets per round |
 | Conversation → diagnosis | Passed | Ask BIT text reaches the diagnosis with history on, never with "This round only" |
-| Automatic checks | Passed | JSON, `node --check` and Python `ast.parse` report errors with line numbers; nothing is executed (marker file test); an already-broken file is not blamed; a missing Python is reported |
-| Check → correction | Passed with fake provider | A failing file is sent back once with the error; the corrected proposal shows "passed"; a second failure or a failed correction keeps the first proposal with the failure shown |
-| Browser → API → UI | Passed with test provider | Fixture with `UI_FIXTURE_QUESTIONS=1`: answer flow and "Propose without answering", desktop and 390 px |
+| Automatic checks | Passed | JSON, `node --check`, Python `ast.parse` and C/C++ bracket balance report errors with line numbers; nothing is executed (marker file test); an already-broken file is not blamed; a missing Python is reported |
+| Check → correction | Passed with fake provider | A failing file, or a proposal that changes nothing, is sent back once with the problem; a corrected proposal replaces the first (a remaining failure is shown); a correction that fails or hits the time limit keeps the first proposal |
+| Browser → API → UI | Passed with test provider | Fixture with `UI_FIXTURE_QUESTIONS=1`: answer flow, "Propose without answering", an unsent answer kept across Back, a context change on the question page, desktop and 390 px |
 | Real model inference | Not performed | No real Codex or Anthropic account was used |

@@ -449,18 +449,101 @@ test('a proposal that still fails, or whose correction fails, is kept with the f
   assert.equal(proposal.checks?.[0].status, 'failed');
 });
 
-test('path spellings, unchanged files and a mislabelled outcome do not discard a usable proposal', async t => {
+test('path spellings and unchanged files do not discard a usable proposal; a model request for information is respected', async t => {
   const h = await harness(t);
   const task = await h.seed([makeFile('motion.py', 'return_duration = 0.6\n', 'code'), makeFile('notes.md', 'keep\n', 'note')]);
-  h.provider.replies.push(JSON.stringify({ outcome: 'needs_information', title: 'Try a slower return', summary: '', rationale: '', evidence: [], questions: ['Does it still slam after the change?'], risk: '', changes: [{ path: 'files/motion.py', afterContent: 'return_duration = 1.2\n' }, { path: './notes.md', afterContent: 'keep\n' }] }));
+  h.provider.replies.push(JSON.stringify({ outcome: 'proposal', title: 'Try a slower return', summary: '', rationale: '', evidence: [], questions: ['Does it still slam after the change?'], risk: '', changes: [{ path: 'files/motion.py', afterContent: 'return_duration = 1.2\n' }, { path: '.\\notes.md', afterContent: 'keep\n' }] }));
   let proposal = await h.investigate(task);
-  assert.equal(proposal.outcome, 'proposal', 'A concrete change is reviewable even when the model also asked something');
+  assert.equal(proposal.outcome, 'proposal');
   assert.deepEqual(proposal.changes.map(change => change.path), ['motion.py']);
-  assert.deepEqual(proposal.questions, ['Does it still slam after the change?']);
-  h.provider.replies.push(JSON.stringify({ outcome: 'proposal', title: 'Nothing to change', summary: '', rationale: '', evidence: [], questions: ['Which phase feels abrupt?'], risk: '', changes: [{ path: 'motion.py', afterContent: 'return_duration = 0.6\n' }] }));
+  assert.deepEqual(proposal.questions, ['Does it still slam after the change?'], 'Questions next to a change are things to watch during the test');
+  // The model said it cannot change anything safely yet: its draft edit is not offered for Apply.
+  h.provider.replies.push(JSON.stringify({ outcome: 'needs_information', title: 'Servo limit needed', summary: '', rationale: '', evidence: [], questions: ['What is the measured maximum angle of J2?'], risk: '', changes: [{ path: 'motion.py', afterContent: 'max_angle = 180\n' }] }));
   proposal = await h.investigate(task);
   assert.equal(proposal.outcome, 'needs_information');
-  assert.equal(proposal.changes.length, 0);
+  assert.deepEqual(proposal.changes, []);
+  assert.equal(h.provider.requests.length, 2);
+});
+
+test('an answer the service cannot use gets one correction request instead of a failed diagnosis', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.replies.push(JSON.stringify({ outcome: 'proposal', title: 'Nothing changed', summary: '', rationale: '', evidence: [], questions: ['Watch the return'], risk: '', changes: [{ path: 'motion.py', afterContent: 'return_duration = 0.6\n' }] }));
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  const proposal = await h.investigate(task);
+  assert.equal(h.provider.requests.length, 2);
+  assert.match(h.provider.requests[1].prompt, /proposed no change/);
+  assert.equal(proposal.outcome, 'proposal');
+  assert.equal(proposal.changes[0].afterContent, 'return_duration = 1.2\n');
+  assert.equal((await currentRound(h, task)).clarifications, undefined, 'Watch-points are not recorded as unanswered questions');
+});
+
+test('a correction cut off by the time limit keeps the first proposal', async t => {
+  const provider = new FakeProvider();
+  const h = await harness(t, provider, { timeoutMs: 1500 });
+  const task = await h.seed([makeFile('config.json', '{"return_duration": 0.6}\n', 'hardware')]);
+  const run = provider.run.bind(provider);
+  let calls = 0;
+  provider.run = async request => {
+    if (++calls === 1) return run(request);
+    provider.requests.push(request);
+    return new Promise((_resolve, reject) => request.signal.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true }));
+  };
+  provider.proposal([{ path: 'config.json', afterContent: '{"return_duration": 1.2,}\n' }]);
+  const proposal = await h.investigate(task);
+  assert.equal(calls, 2);
+  assert.equal(proposal.changes[0].afterContent, '{"return_duration": 1.2,}\n');
+  assert.equal(proposal.checks?.[0].status, 'failed');
+  assert.equal((await currentRound(h, task)).suggestion?.id, proposal.id);
+});
+
+test('answers from a completed round reach the next round; a repeated answer is recorded once', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.replies.push(question('Which servo drives J2?'));
+  await h.investigate(task);
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  const proposal = await investigateWith(h, task, { answer: 'ANSWER_SENTINEL: MG996R at 6 V' });
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  await investigateWith(h, task, { answer: 'ANSWER_SENTINEL: MG996R at 6 V' });
+  assert.equal((await currentRound(h, task)).clarifications?.length, 1, 'Retrying with the same answer adds nothing');
+  const latest = (await currentRound(h, task)).suggestion as Proposal;
+  assert.notEqual(latest.id, proposal.id);
+  assert.equal((await h.apply(task, latest)).statusCode, 200);
+  // Record feedback and open round 2, as the workbench does.
+  const envelope = await h.workspace();
+  const state = structuredClone(envelope.workspace);
+  const current = state.tasks[0];
+  const next = newRound(2);
+  next.observation.issues = ['Too fast'];
+  current.rounds = current.rounds.map(item => item.id === task.activeRoundId ? { ...item, result: 'Same', completedAt: new Date().toISOString() } : item).concat(next);
+  current.activeRoundId = next.id;
+  assert.equal((await h.api('PUT', '/api/workspace', { workspace: state, expectedRevision: envelope.revision })).statusCode, 200);
+  h.provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 2.0\n' }]);
+  await h.investigate({ ...task, activeRoundId: next.id });
+  const prompt = h.provider.requests.at(-1)!.prompt;
+  assert.ok(prompt.includes('ANSWER_SENTINEL: MG996R at 6 V') && prompt.includes('Which servo drives J2?'), 'Round 2 knows what round 1 answered');
+});
+
+test('question rounds keep a bounded history, and imported tasks carry no recorded answers', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  for (let i = 0; i < 22; i++) {
+    h.provider.replies.push(question(`Question ${i}`));
+    await h.investigate(task);
+  }
+  const round = await currentRound(h, task);
+  assert.equal(round.clarifications?.length, 20);
+  assert.deepEqual(round.clarifications?.at(-1)?.questions, ['Question 21']);
+  const envelope = await h.workspace();
+  assert.equal((await h.api('PUT', '/api/workspace', { workspace: envelope.workspace, expectedRevision: envelope.revision })).statusCode, 200, 'The browser can still save');
+  const imported = structuredClone(envelope.workspace.tasks[0]);
+  imported.id = 'imported-task';
+  imported.rounds[0].clarifications = [{ questions: ['Q'], answer: 'PLANTED_ANSWER' }];
+  const response = await h.api('POST', '/api/workspace/import', { task: imported, sourceId: 'planted-answers' });
+  assert.equal(response.statusCode, 200, response.body);
+  const saved = (response.json() as WorkspaceEnvelope).workspace.tasks.find(item => item.id === 'imported-task')!;
+  assert.equal(saved.rounds[0].clarifications, undefined);
 });
 
 test('linked projects keep same basenames distinct and modify only the reviewed selected file', async t => {
