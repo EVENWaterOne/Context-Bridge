@@ -20,7 +20,8 @@ export function assembledCount(assembly: HardwareAssembly): number {
 export function servoDraft(part?:ServoPart,calibration?:ServoCalibration|null):ServoDraft {
   return {model:part?.model??'SG90',pin:part?.pin??'',calibrate:!!calibration,min:calibration?String(calibration.min):'',max:calibration?String(calibration.max):'',zero:calibration?String(calibration.zero):'',direction:calibration?.direction??1};
 }
-const pinKey=(pin:string)=>pin.trim().toUpperCase().replace(/^GPIO\s*/, '').replace(/\s+/g,'');
+/** GPIO 18, IO18 and 18 are one pin, as are D9, Pin 9 and 9. A0 and PA8 keep their letters. */
+const pinKey=(pin:string)=>pin.trim().toUpperCase().replace(/^(?:PIN\s*)?(?:GPIO|IO|D)?\s*(?=\d)/, '').replace(/\s+/g,'');
 export function parseServoDraft(draft:ServoDraft,joint:HardwareJoint,assembly:HardwareAssembly):{part:ServoPart;calibration:ServoCalibration|null}|{error:string} {
   const part={model:draft.model.trim(),pin:draft.pin.trim()};
   if(!part.model)return {error:'Enter a servo model before adding this part.'};

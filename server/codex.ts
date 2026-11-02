@@ -45,6 +45,11 @@ const SETTINGS: Record<string, unknown> = {
   include_apps_instructions: false, include_collaboration_mode_instructions: false,
 };
 const SAFE_ITEMS = new Set(['userMessage', 'agentMessage', 'reasoning', 'plan', 'contextCompaction']);
+/** What the page shows when Codex starts each kind of item. */
+const ITEM_STATUS: Record<string, string> = {
+  reasoning: 'Codex is thinking…', agentMessage: 'Codex is writing the response…',
+  plan: 'Codex is planning…', contextCompaction: 'Codex is compacting the conversation…',
+};
 const MAX_LINE = 8 * 1024 * 1024;
 const MAX_OUTPUT = 8 * 1024 * 1024;
 const PINNED_VERSION = '0.164.0';
@@ -322,7 +327,7 @@ export class LocalCodexProvider implements CodexProvider {
     const active = this.#run, params = object(message.params);
     if (!active || !active.threadId || params.threadId !== active.threadId) return;
     const method = string(message.method);
-    if (method === 'turn/started') active.turnId = string(object(params.turn).id);
+    if (method === 'turn/started') { active.turnId = string(object(params.turn).id); this.#report(active, 'status', 'Codex started working on the request'); }
     if (active.turnId && params.turnId && params.turnId !== active.turnId) return;
     if (method === 'item/started' || method === 'item/completed') {
       const item = object(params.item), type = string(item.type);
@@ -330,7 +335,16 @@ export class LocalCodexProvider implements CodexProvider {
       if (type === 'agentMessage' && typeof item.text === 'string') {
         this.#storeMessage(active, string(item.id) ?? 'answer', { text: item.text, phase: string(item.phase) });
       }
+      if (method === 'item/started' && ITEM_STATUS[type]) this.#report(active, 'status', ITEM_STATUS[type]);
     }
+    if (method === 'item/reasoning/summaryPartAdded' && Number(params.summaryIndex) > 0) this.#report(active, 'reasoning', '\n\n');
+    if (method === 'item/reasoning/summaryTextDelta' && typeof params.delta === 'string') this.#report(active, 'reasoning', params.delta);
+    if (method === 'error') {
+      const reason = string(object(params.error).message) ?? 'unknown error';
+      this.#report(active, 'status', params.willRetry === true ? `Codex hit a problem and is retrying: ${reason}` : `Codex reported an error: ${reason}`);
+    }
+    if (method === 'warning' && string(params.message)) this.#report(active, 'status', `Codex warning: ${string(params.message)}`);
+    if (method === 'model/rerouted') this.#report(active, 'status', `Codex switched from ${string(params.fromModel) ?? 'the selected model'} to ${string(params.toModel) ?? 'another model'}`);
     if (method === 'item/agentMessage/delta' && typeof params.delta === 'string' && !active.cancelled) {
       const id = string(params.itemId) ?? 'answer', prior = active.messages.get(id) ?? { text: '' };
       this.#storeMessage(active, id, { ...prior, text: prior.text + params.delta });
@@ -355,6 +369,12 @@ export class LocalCodexProvider implements CodexProvider {
       if (!answer?.text.trim()) active.reject(new Error('Codex completed without a response'));
       else active.resolve({ text: answer.text, threadId: active.threadId });
     }
+  }
+
+  /** Progress for the page only; it never changes the run's result. */
+  #report(active: ActiveRun, type: 'status' | 'reasoning', text: string): void {
+    if (active.terminal || active.cancelled) return;
+    try { active.onEvent({ type, text }); } catch (error) { this.#stop(errorOf(error)); }
   }
 
   #storeMessage(active: ActiveRun, id: string, message: Message): void {

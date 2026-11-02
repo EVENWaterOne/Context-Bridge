@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiError, followJob, localApi, WorkspaceSaveQueue } from '../src/lib/local-api.ts';
-import { applyRoundChange, createExampleWorkspace, getActiveTask, getActiveRound, updateRound, updateTask } from '../src/lib/workflow.ts';
+import { ApiError, followJob, localApi, taskMessages, WorkspaceSaveQueue } from '../src/lib/local-api.ts';
+import { applyRoundChange, createExampleWorkspace, createTask, getActiveTask, getActiveRound, updateRound, updateTask } from '../src/lib/workflow.ts';
 import { buildSuggestion } from '../src/lib/agent.ts';
 import type { Workspace } from '../src/lib/workflow.ts';
-import type { WorkspaceEnvelope, JobView } from '../src/lib/backend-types.ts';
+import type { ChatMessage, WorkspaceEnvelope, JobView } from '../src/lib/backend-types.ts';
 
 const envelope = (workspace: Workspace, revision = 1): WorkspaceEnvelope => ({ version: 2, workspace, revision, activeJobs: [] });
 const renamed = (state: Workspace, name: string) => updateTask(state, { name });
@@ -36,6 +36,30 @@ test('a no-op flush cannot swallow a simultaneous edit and adoption prevents red
   assert.deepEqual(names, ['Latest draft']);
   const authoritative = renamed(initial, 'Server result'); queue.adopt(envelope(authoritative, 8));
   await queue.save(authoritative); assert.equal(names.length, 1);
+});
+
+test('a task created in the browser has no messages before its first save lands, and a missing saved task still fails', async () => {
+  const initial = createExampleWorkspace(), created = createTask(initial, 'New arm task'), fresh = getActiveTask(created);
+  const server = new Map<string, ChatMessage[]>(initial.tasks.map(t => [t.id, []])), requests: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const path = String(input); requests.push(path);
+    const messages = server.get(decodeURIComponent(path.split('/')[3]));
+    return messages ? Response.json(messages) : Response.json({ error: { code: 'NOT_FOUND', message: 'Task not found.' } }, { status: 404 });
+  }) as typeof fetch;
+  const queue = new WorkspaceSaveQueue(envelope(initial), async (state, revision) => {
+    for (const t of state.tasks) if (!server.has(t.id)) server.set(t.id, []);
+    return envelope(state, revision + 1);
+  });
+  try {
+    assert.deepEqual(await taskMessages(fresh.id, queue), []);
+    assert.deepEqual(requests, []);
+    await queue.save(created);
+    assert.deepEqual(await taskMessages(fresh.id, queue), []);
+    assert.equal(requests.length, 1);
+    server.delete(fresh.id);
+    await assert.rejects(taskMessages(fresh.id, queue), (error: unknown) => error instanceof ApiError && error.status === 404 && error.message === 'Task not found.');
+  } finally { globalThis.fetch = original; }
 });
 
 test('legacy apply rejects missing or ambiguous source and backend proposals cannot mutate in browser', () => {

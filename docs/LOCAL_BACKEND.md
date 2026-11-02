@@ -75,7 +75,7 @@
 | `POST /api/agent/chat` | `{taskId,message,model?,provider?}` → 202 job；同上 |
 | `GET /api/tasks/:id/messages` | 当前任务持久化聊天 |
 | `GET /api/jobs/:id` | 已持久化的任务状态 |
-| `GET /api/jobs/:id/events` | SSE：`event: job`，data 为完整 job；终态后关闭 |
+| `GET /api/jobs/:id/events` | SSE：`event: job`，data 为完整 job；终态后关闭。job 含 `message`（当前步骤）、`activity`（按时间的步骤记录，最多 60 条）、`reasoning`（模型发来的推理摘要，可能为空）和 `text`（流式输出） |
 | `POST /api/jobs/:id/cancel` | 中断真实任务；最终状态以 job 终态为准 |
 | `POST /api/agent/apply` | `{taskId,roundId,suggestionId,idempotencyKey}` → 操作 ID、变更文件、权威工作区 |
 | `POST /api/operations/:id/undo` | `{idempotencyKey}` → 撤销结果和权威工作区 |

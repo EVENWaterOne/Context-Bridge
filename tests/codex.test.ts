@@ -47,6 +47,16 @@ createInterface({input:process.stdin}).on('line',line=>{
    event('turn/completed',{threadId:'thread-1',turn:{id:'turn-1',status:'completed',items:[{id:'large-answer',type:'agentMessage',text:'y'.repeat(4*1024*1024),phase:'final_answer'}]}});return;
   }
   event('item/agentMessage/delta',{threadId:'different-thread',turnId:'turn-1',itemId:'foreign',delta:'WRONG'});
+  event('item/started',{threadId:'thread-1',turnId:'turn-1',item:{id:'think',type:'reasoning',summary:[],content:[]}});
+  event('item/reasoning/summaryTextDelta',{threadId:'thread-1',turnId:'turn-1',itemId:'think',summaryIndex:0,delta:'Reading the '});
+  event('item/reasoning/summaryTextDelta',{threadId:'thread-1',turnId:'turn-1',itemId:'think',summaryIndex:0,delta:'snapshot'});
+  event('item/reasoning/summaryPartAdded',{threadId:'thread-1',turnId:'turn-1',itemId:'think',summaryIndex:1});
+  event('item/reasoning/summaryTextDelta',{threadId:'thread-1',turnId:'turn-1',itemId:'think',summaryIndex:1,delta:'Comparing timing'});
+  event('item/reasoning/summaryTextDelta',{threadId:'different-thread',turnId:'turn-1',itemId:'foreign',summaryIndex:0,delta:'FOREIGN'});
+  event('warning',{threadId:'thread-1',message:'Rate limit nearly reached'});
+  event('error',{threadId:'thread-1',turnId:'turn-1',error:{message:'stream disconnected'},willRetry:true});
+  event('model/rerouted',{threadId:'thread-1',turnId:'turn-1',fromModel:'gpt-test',toModel:'gpt-other',reason:'highRiskCyberActivity'});
+  event('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'think',type:'reasoning',summary:['Reading the snapshot','Comparing timing'],content:[]}});
   event('item/started',{threadId:'thread-1',turnId:'turn-1',item:{id:'comment',type:'agentMessage',text:'',phase:'commentary'}});
   event('item/agentMessage/delta',{threadId:'thread-1',turnId:'turn-1',itemId:'comment',delta:'Checking...'});
   event('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'comment',type:'agentMessage',text:'Checking...',phase:'commentary'}});
@@ -126,6 +136,19 @@ for (const mode of ['normal', 'early']) test(`${mode}: structured turn aggregate
   assert.deepEqual(turn.params.sandboxPolicy, { type: 'readOnly', networkAccess: false });
   assert.deepEqual(turn.params.outputSchema, request().outputSchema);
   assert.equal('access' in turn.params.sandboxPolicy, false);
+});
+
+test('progress events report each step, the reasoning summary and warnings without changing the answer', async t => {
+  const { provider, request } = await setup(t);
+  const events: { type: string; text: string }[] = [];
+  const result = await provider.run({ ...request(), onEvent: event => events.push(event) });
+  assert.deepEqual(result, { text: '{"answer":"done"}', threadId: 'thread-1' });
+  assert.deepEqual(events.filter(e => e.type === 'status').map(e => e.text), [
+    'Codex started working on the request', 'Codex is thinking…', 'Codex warning: Rate limit nearly reached',
+    'Codex hit a problem and is retrying: stream disconnected', 'Codex switched from gpt-test to gpt-other', 'Codex is writing the response…',
+  ]);
+  assert.equal(events.filter(e => e.type === 'reasoning').map(e => e.text).join(''), 'Reading the snapshot\n\nComparing timing');
+  assert.equal(events.filter(e => e.type === 'delta').map(e => e.text).join(''), 'Checking...{"answer":"done"}');
 });
 
 for (const mode of ['unsafe', 'mcp']) test(`${mode}: startup fails closed when isolation checks fail`, async t => {

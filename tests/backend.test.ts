@@ -656,6 +656,45 @@ test('chat is task-bound, persists across restart, and cannot write project file
   assert.equal((await h.workspace()).workspace.tasks[0].files[0].content, 'return_duration = 0.6\n');
 });
 
+test('a run keeps the steps and reasoning summary the provider reported, in order', async t => {
+  const provider = new FakeProvider(), run = provider.run.bind(provider);
+  provider.run = async request => {
+    request.onEvent({ type: 'status', text: 'Codex is thinking…' });
+    request.onEvent({ type: 'reasoning', text: 'Comparing the return' });
+    request.onEvent({ type: 'reasoning', text: ' duration.' });
+    request.onEvent({ type: 'status', text: 'Codex is thinking…' });
+    return run(request);
+  };
+  const h = await harness(t, provider);
+  const task = await h.seed();
+  provider.replies.push('The return duration is the likely cause.');
+  const response = await h.api('POST', '/api/agent/chat', { taskId: task.id, message: 'Why is the return abrupt?' });
+  assert.equal(response.statusCode, 202, response.body);
+  const job = await h.terminal((response.json() as JobView).id);
+  assert.equal(job.status, 'completed', JSON.stringify(job));
+  assert.deepEqual(job.activity!.map(step => step.text), [
+    'Preparing the selected context', 'Checking the Codex connection', 'Codex is connected. Sending the selected context…',
+    'Codex is thinking…', 'Reading selected context', 'Reply complete',
+  ]);
+  assert.ok(job.activity!.every(step => !Number.isNaN(Date.parse(step.at))));
+  assert.equal(job.message, 'Reply complete');
+  assert.equal(job.reasoning, 'Comparing the return duration.');
+  const saved = (await h.api('GET', `/api/tasks/${task.id}/messages`)).json() as { text: string }[];
+  assert.equal(saved.at(-1)!.text, 'The return duration is the likely cause.', 'The reasoning summary is never the reply');
+});
+
+test('a failed run ends its step history with the reason', async t => {
+  const h = await harness(t);
+  const task = await h.seed();
+  h.provider.authenticated = false;
+  const response = await h.api('POST', '/api/agent/chat', { taskId: task.id, message: 'Hello' });
+  assert.equal(response.statusCode, 202, response.body);
+  const job = await h.terminal((response.json() as JobView).id);
+  assert.equal(job.status, 'failed');
+  assert.match(job.error!, /Connect Codex/);
+  assert.equal(job.activity!.at(-1)!.text, job.error);
+});
+
 test('completed job event streams can be reattached without losing the terminal result', async t => {
   const h = await harness(t);
   const task = await h.seed();

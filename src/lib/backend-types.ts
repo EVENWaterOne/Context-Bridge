@@ -39,6 +39,8 @@ export interface ChatMessage {
   status?: 'completed' | 'failed' | 'cancelled' | 'interrupted';
 }
 export type JobStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+/** One step the agent reported, in order. */
+export interface JobActivity { at: string; text: string }
 export interface JobView {
   id: string;
   taskId: string;
@@ -47,6 +49,10 @@ export interface JobView {
   status: JobStatus;
   message: string;
   text: string;
+  /** Status history; absent on runs saved before it existed. */
+  activity?: JobActivity[];
+  /** Reasoning summary streamed by the provider, if any. */
+  reasoning?: string;
   result?: Proposal | ChatMessage;
   error?: string;
   createdAt: string;

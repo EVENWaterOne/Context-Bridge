@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {Mesh} from 'three';
 import {createHardwareArmModel} from '../src/components/HardwareArm.ts';
 import {assembledCount,emptyAssembly,parseServoDraft,servoDraft} from '../src/lib/assembly.ts';
-import {JOINT_IDS,pendingCalibration} from '../src/lib/hardware.ts';
+import {JOINT_IDS,MEASURED_UNO_ARM,pendingCalibration,recordedUnoCalibration,usesRecordedUnoCalibration} from '../src/lib/hardware.ts';
 import {createTask,createInitialWorkspace,getActiveTask,updateHardware,completeHardwareSetup,saveWorkspace,loadWorkspace,makeFile} from '../src/lib/workflow.ts';
 
 test('new tasks start empty; a partial build and unfinished form survive reload and cannot run',()=>{
@@ -28,6 +28,12 @@ test('servo forms reject reused channels and incomplete or inverted calibration 
   assert.deepEqual(parsed,{part:{model:'SG90',pin:'19'},calibration:{min:25,max:140,zero:80,direction:-1}});
   assert.deepEqual(parseServoDraft(servoDraft(),'J2',assembly),{part:{model:'SG90',pin:''},calibration:null});
 });
+test('pin names from Arduino and ESP32 boards collide only when they name the same pin',()=>{
+  const assembly={...emptyAssembly(),category:'robot-arm' as const,parts:{J1:{model:'SG90',pin:'D9'},J2:{model:'SG90',pin:'IO18'},J3:{model:'SG90',pin:'A0'}}};
+  for(const pin of ['9','d9','Pin 9','D 9','GPIO 18','18'])assert.ok('error' in parseServoDraft({...servoDraft(),pin},'J4',assembly),pin);
+  for(const pin of ['D10','A1','D0','PA8','19'])assert.ok(!('error' in parseServoDraft({...servoDraft(),pin},'J4',assembly)),pin);
+  assert.ok(!('error' in parseServoDraft({...servoDraft(),pin:'D9'},'J1',assembly)));
+});
 test('completed assembly generates actual hardware context and preserves uploaded files and existing tasks',()=>{
   const initial=createInitialWorkspace();let state=createTask(initial,'New build');
   const assembly={...emptyAssembly(),category:'robot-arm' as const,step:5,parts:Object.fromEntries(JOINT_IDS.map((id,i)=>[id,{model:i===3?'MG90S':'SG90',pin:String(18+i)}]))};
@@ -41,6 +47,19 @@ test('completed assembly generates actual hardware context and preserves uploade
   assert.equal(context.axes.J4.model,'MG90S');assert.equal(context.axes.J4.pin,'21');assert.deepEqual(context.servoCalibration,limits);
   assert.deepEqual(task.files.find(f=>f.id===uploaded.id),uploaded);assert.deepEqual(state.tasks[0],initial.tasks[0]);
   assert.equal(completeHardwareSetup(state).tasks.at(-1)!.files.length,task.files.length);
+});
+test('recorded Uno limits fill all four channels as a copy, complete setup and are flagged on other controllers',()=>{
+  const assembly={...emptyAssembly(),category:'robot-arm' as const,step:5,parts:Object.fromEntries(JOINT_IDS.map((id,i)=>[id,{model:'SG90',pin:`D${9+i}`}]))};
+  let state=createTask(createInitialWorkspace(),'Uno build');
+  state=updateHardware(state,{assembly,controller:'Arduino Uno',connection:'USB serial · 115200 baud',servoCalibration:recordedUnoCalibration()});
+  state=completeHardwareSetup(state);
+  const context=(name:string)=>JSON.parse(getActiveTask(state).files.find(f=>f.name===name)!.content);
+  assert.deepEqual(getActiveTask(state).hardware.servoCalibration,MEASURED_UNO_ARM.calibration);
+  assert.deepEqual(context('context-bridge-hardware.json').servoCalibration,MEASURED_UNO_ARM.calibration);assert.match(context('context-bridge-hardware.json').calibrationNote,/filled from measuredArm/);
+  const copy=recordedUnoCalibration();copy.J4!.min=0;assert.equal(MEASURED_UNO_ARM.calibration.J4!.min,98);
+  assert.ok(!usesRecordedUnoCalibration(copy));assert.ok(!usesRecordedUnoCalibration(pendingCalibration()));
+  state=updateHardware(state,{controller:'ESP32'});
+  assert.equal(context('context-bridge-hardware.json').measuredArm,undefined);assert.match(context('context-bridge-hardware.json').calibrationNote,/do not carry over/);
 });
 test('progressive render reveals only added geometry and ends with the unchanged four-servo rig',()=>{
   const model=createHardwareArmModel(0);const meshes:Mesh[]=[];model.scene.traverse(o=>{if(o instanceof Mesh)meshes.push(o)});
