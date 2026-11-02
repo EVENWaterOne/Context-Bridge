@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PROVIDER_LABELS, type JobView, type ChatMessage, type CommandRun, type FileCheck, type Proposal, type ProviderId, type Verification, type VerificationRun } from '../src/lib/backend-types.ts';
@@ -11,8 +12,9 @@ import { contextHash, writeSnapshot, diagnosisPrompt, chatPrompt, parseProposal,
 import { checkChanges } from './verify.ts';
 import { diagnosisOutputSchema, runOutputSchema } from './validation.ts';
 import { BridgeError, conflict, invalid } from './errors.ts';
-import { createWorkCopy, detectCommand, listProject, readEdits, removeCopy, writeChanges, type WorkCopy } from './workcopy.ts';
-import { runShell } from './runner.ts';
+import { createWorkCopy, detectCommand, readEdits, removeCopy, writeChanges, type WorkCopy } from './workcopy.ts';
+import { runShell, type Sandbox } from './runner.ts';
+import { codexBinary } from './codex.ts';
 
 export interface InvestigateOptions {
   /** The user's answer to the questions of the last diagnosis, saved with the round. */
@@ -29,14 +31,35 @@ const tail = (text: string | undefined, size: number) => text && text.length > s
 const shortCommand = (text: string) => { const line = text.replace(/\s+/g, ' ').trim(); return line.length > 140 ? `${line.slice(0, 140)}…` : line; };
 const minutes = (ms: number) => { if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} seconds`; const value = Math.round(ms / 60_000); return value === 1 ? 'one minute' : value === 5 ? 'five minutes' : `${value} minutes`; };
 
-/** The verification command for a run: the user's own, else one detected in the project copy. */
-export function commandFor(task: Task, paths: string[], read: (rel: string) => string | undefined): { text: string; source: 'user' | 'detected' } | undefined {
+/**
+ * The verification command for a run: only one the user typed or confirmed. A detected command is a
+ * suggestion on the page until the user confirms it, because it comes from the project's own files.
+ */
+export function commandFor(task: Task): { text: string; source: 'user' } | undefined {
   const own = task.execution?.command?.trim();
-  if (own) return { text: own, source: 'user' };
-  const detected = detectCommand(task, paths, read);
-  return detected ? { text: detected, source: 'detected' } : undefined;
+  return own ? { text: own, source: 'user' } : undefined;
 }
-function readText(path: string): string | undefined { try { return readFileSync(path, 'utf8'); } catch { return undefined; } }
+export { detectCommand };
+/**
+ * The OS sandbox for the verification command: Codex's own, from the pinned binary, with the
+ * service's isolated Codex profile (which also keeps the one-time Windows sandbox setup).
+ */
+export async function codexSandbox(dataDir: string): Promise<Sandbox | undefined> {
+  try { const binary = await codexBinary(); return { command: binary.command, env: binary.env, home: join(dataDir, 'codex'), writable: [] }; }
+  catch { return undefined; }
+}
+/** The real project's own tools: its virtual environment and node_modules, read-only from the copy. */
+function projectTools(root: string | undefined): { path: string[]; env: Record<string, string> } {
+  const path: string[] = [], env: Record<string, string> = {};
+  if (!root) return { path, env };
+  for (const name of ['.venv', 'venv']) {
+    const bin = join(root, name, process.platform === 'win32' ? 'Scripts' : 'bin');
+    if (existsSync(bin)) { path.push(bin); env.VIRTUAL_ENV = join(root, name); break; }
+  }
+  const modules = join(root, 'node_modules');
+  if (existsSync(modules)) { path.push(join(modules, '.bin')); env.NODE_PATH = modules; }
+  return { path, env };
+}
 function describe(run: VerificationRun): string {
   if (run.status === 'passed') return 'passed';
   if (run.status === 'unavailable') return 'could not run (program not found)';
@@ -66,9 +89,12 @@ export class Jobs {
   /** Whether a task without a saved choice runs code while diagnosing. */
   runCodeDefault: boolean;
   closing = false;
-  constructor(store: Store, files: FileService, provider: ProviderSwitch, dataDir: string, timeoutMs = 5 * 60 * 1000, run: { timeoutMs?: number; byDefault?: boolean } = {}) {
+  /** The sandbox the verification command runs in; without one it does not run. */
+  sandbox: () => Promise<Sandbox | undefined>;
+  constructor(store: Store, files: FileService, provider: ProviderSwitch, dataDir: string, timeoutMs = 5 * 60 * 1000, run: { timeoutMs?: number; byDefault?: boolean; sandbox?: () => Promise<Sandbox | undefined> } = {}) {
     this.store = store; this.files = files; this.provider = provider; this.dataDir = dataDir; this.timeoutMs = timeoutMs;
     this.runTimeoutMs = run.timeoutMs ?? 20 * 60 * 1000; this.runCodeDefault = run.byDefault ?? true;
+    this.sandbox = run.sandbox ?? (() => codexSandbox(dataDir));
   }
   /** Whether diagnoses of this task run code in a project copy. */
   runsCode(task: Task): boolean { return task.execution?.enabled ?? this.runCodeDefault; }
@@ -115,6 +141,7 @@ export class Jobs {
       // command on the current files and then on exactly the proposed text.
       let work: WorkCopy | undefined, verifyCopy: WorkCopy | undefined, tools = false;
       const commands: CommandRun[] = [];
+      let commandCount = 0;
       const verification: Verification = {};
       // A Stop ends the job. The job time limit ending an optional correction does not: the first
       // proposal is kept.
@@ -130,13 +157,20 @@ export class Jobs {
         const status = await provider.status();
         if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
         if (!status.available || !status.authenticated) throw new Error(status.error || `Connect ${agent} in Settings before sending a request.`);
-        let command: { text: string; source: 'user' | 'detected' } | undefined, runContext: RunContext | undefined;
+        let command: { text: string; source: 'user' } | undefined, runContext: RunContext | undefined, sandbox: Sandbox | undefined;
+        const tools0 = projectTools(task.rootPath);
+        const verifyTemp = join(snapshotDir, 'check-tmp');
         const verify = async (copy: WorkCopy, when: 'before' | 'after'): Promise<VerificationRun> => {
           const { text, source } = command!;
           note(job, when === 'before' ? `Running the verification command on your current files: ${shortCommand(text)}` : `Running the verification command on ${agent}'s change: ${shortCommand(text)}`); this.emit(job);
           let outcome: VerificationRun;
           try {
-            const result = await runShell(text, copy.dir, controller.signal, Math.max(1_000, Math.min(VERIFY_LIMIT_MS, limit - (Date.now() - started))));
+            // In the OS sandbox: writes only in the check copy and its temporary folder, no network.
+            // Build caches go to that folder too, so a tool does not need to write in the user's home.
+            const result = await runShell(text, copy.dir, controller.signal, Math.max(1_000, Math.min(VERIFY_LIMIT_MS, limit - (Date.now() - started))), {
+              sandbox: { ...sandbox!, writable: [verifyTemp] }, path: tools0.path, scriptDir: verifyTemp,
+              env: { ...tools0.env, TMPDIR: verifyTemp, TMP: verifyTemp, TEMP: verifyTemp, PYTHONDONTWRITEBYTECODE: '1', ARDUINO_BUILD_CACHE_PATH: join(verifyTemp, 'arduino-cache'), PLATFORMIO_CACHE_DIR: join(verifyTemp, 'platformio-cache'), PLATFORMIO_BUILD_CACHE_DIR: join(verifyTemp, 'platformio-build-cache') },
+            });
             outcome = {
               command: text, source, exitCode: result.exitCode, durationMs: result.durationMs,
               status: result.notFound ? 'unavailable' : result.timedOut ? 'timeout' : result.exitCode === 0 ? 'passed' : 'failed',
@@ -158,15 +192,18 @@ export class Jobs {
           }) : { available: false, note: `${agent} cannot run commands in this service.` };
           if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
           tools = access.available;
-          if (!tools) { note(job, `${access.note} ${agent} will not run commands itself; the build or test command still runs.`); this.emit(job); }
-          note(job, 'Copying the project, so code can run without touching your files…'); this.emit(job);
+          if (!tools) { note(job, `${access.note} ${agent} will not run commands itself.`); this.emit(job); }
+          command = commandFor(task);
+          if (command) {
+            sandbox = await this.sandbox();
+            if (!sandbox) { note(job, 'No sandbox is available on this computer for the build or test command, so it does not run.'); this.emit(job); command = undefined; }
+          }
+          if (!tools && !command) { note(job, 'Nothing runs in this request, so it works like Read only.'); this.emit(job); }
+          else { note(job, 'Copying the project, so code can run without touching your files…'); this.emit(job); }
           if (tools) work = await createWorkCopy(task, join(snapshotDir, 'work'), controller.signal);
-          const copy = work;
-          const listed = copy ? undefined : await listProject(task);
-          const own = new Map(task.files.map(f => [filePath(f), f.content]));
-          command = commandFor(task, copy ? [...copy.manifest.keys()] : listed!.paths, rel => own.get(rel) ?? (copy ? readText(join(copy.dir, ...rel.split('/'))) : listed!.read(rel)));
           if (command) {
             verifyCopy = await createWorkCopy(task, join(snapshotDir, 'check'), controller.signal);
+            await Promise.all([mkdir(verifyTemp, { recursive: true }), mkdir(sandbox!.home, { recursive: true })]);
             verification.before = await verify(verifyCopy, 'before');
           }
           runContext = { tools, editable: task.files.filter(f => f.includeInContext !== false).map(f => filePath(f)), command: command?.text, before: verification.before };
@@ -176,6 +213,8 @@ export class Jobs {
         const run = async (text: string) => {
           const result = await provider.run({
             prompt: text, snapshotDir, model, signal: controller.signal, workspace: work?.dir,
+            // The adapter's own limit never cuts the job's limit short (run mode allows longer builds).
+            timeoutMs: Math.max(1_000, limit - (Date.now() - started)),
             outputSchema: kind === 'investigate' ? (tools ? runOutputSchema : diagnosisOutputSchema) : undefined,
             onEvent: event => {
               if (controller.signal.aborted || job.status !== 'running') return;
@@ -183,10 +222,11 @@ export class Jobs {
                 const entry: CommandRun = { ...event.command, command: event.command.command.slice(0, 4_000), output: tail(event.command.output, KEPT_OUTPUT) };
                 const index = commands.findIndex(item => item.id === entry.id);
                 if (index >= 0) commands[index] = entry;
-                else { commands.push(entry); if (commands.length > KEPT_COMMANDS) commands.shift(); }
+                else { commands.push(entry); commandCount++; if (commands.length > KEPT_COMMANDS) commands.shift(); }
                 job.commands = commands.slice(-LIVE_COMMANDS).map(item => ({ ...item, output: tail(item.output, LIVE_OUTPUT) }));
+                job.commandCount = commandCount;
                 const exit = entry.exitCode !== undefined && entry.exitCode !== null ? ` (exit code ${entry.exitCode})` : '';
-                note(job, entry.status === 'running' ? `Running: ${shortCommand(entry.command)}` : entry.status === 'declined' ? `Not allowed: ${shortCommand(entry.command)}` : `${entry.status === 'completed' ? 'Finished' : 'Failed'}: ${shortCommand(entry.command)}${exit}`);
+                note(job, entry.status === 'running' ? `${index >= 0 ? 'Running in the background' : 'Running'}: ${shortCommand(entry.command)}` : entry.status === 'declined' ? `Not allowed: ${shortCommand(entry.command)}` : `${entry.status === 'completed' ? 'Finished' : 'Failed'}: ${shortCommand(entry.command)}${exit}`);
               } else if (event.type === 'delta') {
                 if (job.text.length + event.text.length > 2 * 1024 * 1024) { controller.abort(); return; }
                 job.text += event.text;
@@ -197,6 +237,12 @@ export class Jobs {
               this.emit(job);
             },
           });
+          // The provider ends commands left running in the background before it returns.
+          if (commands.some(item => item.status === 'running')) {
+            for (const [index, item] of commands.entries()) if (item.status === 'running') commands[index] = { ...item, status: 'failed', exitCode: null, output: tail(`${item.output ? `${item.output}\n` : ''}Still running when ${agent} finished, so it was stopped.`, KEPT_OUTPUT) };
+            job.commands = commands.slice(-LIVE_COMMANDS).map(item => ({ ...item, output: tail(item.output, LIVE_OUTPUT) }));
+            this.emit(job);
+          }
           if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
           ensureCurrent();
           return result;
@@ -252,7 +298,7 @@ export class Jobs {
           if (!proposal) throw rejected!;
           ensureCurrent();
           const ran = runMode ? {
-            commands: commands.map(item => ({ ...item, output: tail(item.output, KEPT_OUTPUT) })),
+            commands: commands.map(item => ({ ...item, output: tail(item.output, KEPT_OUTPUT) })), commandCount,
             ...(command ? { verification: { ...verification, ...(after ? { after } : {}) } } : {}),
           } : {};
           const final: Proposal = proposal.outcome === 'proposal' ? { ...proposal, checks, ...ran } : { ...proposal, ...ran };
@@ -271,8 +317,9 @@ export class Jobs {
         if (kind === 'chat') this.store.message(taskId, { id: `msg-${job.id}`, role: 'bit', text: job.text || job.error, status: job.status === 'cancelled' ? 'cancelled' : 'failed', createdAt: new Date().toISOString() });
       } finally {
         clearTimeout(timeout);
-        // The copies can be large; the proposal keeps everything the review needs.
-        if (work || verifyCopy) await Promise.all([removeCopy(join(snapshotDir, 'work')), removeCopy(join(snapshotDir, 'check'))]);
+        // The copies can be large; the proposal keeps everything the review needs. A copy that stopped
+        // partway, and the agents' temporary folders, go too.
+        if (runMode) await Promise.all(['work', 'check', 'check-tmp', 'tmp'].map(name => removeCopy(join(snapshotDir, name))));
         this.controllers.delete(job.id);
         this.emit(job);
       }

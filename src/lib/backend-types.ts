@@ -57,8 +57,10 @@ export interface Proposal extends Suggestion {
   contextHash: string;
   provider?: ProviderId;
   checks?: FileCheck[];
-  /** Run mode: commands the agent ran in its project copy. */
+  /** Run mode: commands the agent ran in its project copy (the latest ones when there were many). */
   commands?: CommandRun[];
+  /** Run mode: how many commands the agent ran in all. */
+  commandCount?: number;
   /** Run mode: the verification command before and after the proposed change. */
   verification?: Verification;
   /** Run mode: files outside the selection that the agent created or changed. They are not applied. */
@@ -73,6 +75,10 @@ export interface ExecutionInfo {
   detected?: string;
   /** What confines the agent's commands with the current provider on this computer. */
   sandbox: string;
+  /** Whether the agent can run commands here, when known before a request (Codex on Windows sets up on first use). */
+  tools?: { available: boolean; note: string };
+  /** Whether the service has a sandbox to run the build or test command in. */
+  checker: boolean;
 }
 export interface ChatMessage {
   id: string;
@@ -97,8 +103,10 @@ export interface JobView {
   /** Reasoning summary streamed by the provider, if any. */
   reasoning?: string;
   result?: Proposal | ChatMessage;
-  /** Run mode: commands the agent ran so far. */
+  /** Run mode: the latest commands the agent ran so far. */
   commands?: CommandRun[];
+  /** Run mode: how many commands the agent ran so far. */
+  commandCount?: number;
   error?: string;
   createdAt: string;
   threadId?: string;

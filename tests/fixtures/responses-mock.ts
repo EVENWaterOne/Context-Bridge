@@ -7,7 +7,7 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import zlib from 'node:zlib';
 
-export type Step = { shell: string } | { patch: string } | { message: string };
+export type Step = { shell: string; yieldMs?: number } | { patch: string } | { message: string };
 export interface MockRequest { url: string; method: string; body: Record<string, unknown> | null }
 type Json = Record<string, unknown>;
 
@@ -42,7 +42,7 @@ export async function startResponsesMock(steps: Step[]) {
     const tools = Array.isArray(body?.tools) ? body!.tools as Json[] : [];
     const callId = `call_mock_${n}`;
     let item: Json;
-    if ('shell' in step) item = { type: 'function_call', name: 'exec_command', call_id: callId, arguments: JSON.stringify({ cmd: step.shell, yield_time_ms: 20_000 }) };
+    if ('shell' in step) item = { type: 'function_call', name: 'exec_command', call_id: callId, arguments: JSON.stringify({ cmd: step.shell, yield_time_ms: step.yieldMs ?? 20_000 }) };
     else if ('patch' in step) {
       const tool = tools.find(entry => entry.name === 'apply_patch');
       item = tool?.type === 'custom' ? { type: 'custom_tool_call', name: 'apply_patch', call_id: callId, input: step.patch, status: 'completed' } : { type: 'function_call', name: 'apply_patch', call_id: callId, arguments: JSON.stringify({ input: step.patch }) };

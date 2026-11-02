@@ -30,6 +30,8 @@ test('a missing program is reported as not found, not as a failing build', async
   const result = await runShell('context-bridge-no-such-tool --version', dir, live(), 10_000);
   assert.equal(result.notFound, true);
   assert.notEqual(result.exitCode, 0);
+  const pytest = await runShell(`${node} -e "console.error('/usr/bin/python3: No module named pytest'); process.exit(1)"`, dir, live(), 10_000);
+  assert.equal(pytest.notFound, true, 'pytest that is not installed is a missing tool, not a failing test');
 });
 
 test('long output keeps its beginning and its end, where compilers print the errors', async t => {
@@ -62,4 +64,52 @@ test('model credentials are not passed to the verification command, and a Stop c
   const running = runShell(`${node} -e "setTimeout(() => {}, 10000)"`, dir, controller.signal, 20_000);
   setTimeout(() => controller.abort(), 200);
   await assert.rejects(running, { name: 'AbortError' });
+});
+
+test('a background process that keeps the output open does not hold the result after the shell ends', { skip: process.platform === 'win32' ? 'POSIX shell syntax' : false }, async t => {
+  const dir = await folder(t);
+  const started = Date.now();
+  const result = await runShell(`${node} -e "setTimeout(() => {}, 20000)" & echo started`, dir, live(), 30_000);
+  assert.equal(result.exitCode, 0);
+  assert.match(result.output, /started/);
+  assert.ok(Date.now() - started < 10_000, 'The result comes after a short grace period, not after the background process ends');
+});
+
+test('long output cut inside a multi-byte character keeps valid text on both sides', async t => {
+  const dir = await folder(t);
+  // 3-byte characters after a 2-byte prefix: the 4 KB head cut and the 28 KB tail cut land mid-character.
+  const result = await runShell(`${node} -e "process.stdout.write('ab' + '中'.repeat(20000) + 'END')"`, dir, live(), 10_000);
+  assert.match(result.output, /\n…\n/);
+  assert.ok(!result.output.includes('�'), 'No replacement characters at the cuts');
+  assert.match(result.output, /^ab中/);
+  assert.match(result.output, /中END$/);
+});
+
+test('in the sandbox the command writes only in its folder, has no network, and its output and exit code come back', { skip: process.platform !== 'linux' ? 'the sandbox is checked on Linux here' : false }, async t => {
+  const { codexSandbox } = await import('../server/jobs.ts');
+  const dir = await folder(t);
+  const sandbox = await codexSandbox(dir);
+  if (!sandbox) { t.skip('the Codex binary is not installed'); return; }
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  await mkdir(sandbox.home, { recursive: true });
+  const work = join(dir, 'work'), outside = join(dir, 'outside.txt');
+  await mkdir(work);
+  const { createServer } = await import('node:http');
+  const server = createServer((_, response) => response.end('open'));
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const port = (server.address() as { port: number }).port;
+  await writeFile(join(work, 'probe.js'), `
+    const fs = require('fs');
+    fs.writeFileSync('inside.txt', 'x'); console.log('INSIDE_OK');
+    try { fs.writeFileSync(${JSON.stringify(outside)}, 'x'); console.log('OUTSIDE_OPEN'); } catch (e) { console.log('OUTSIDE_BLOCKED', e.code); }
+    require('http').get('http://127.0.0.1:${port}/', r => { console.log('NET_OPEN'); process.exit(4); }).on('error', e => { console.log('NET_BLOCKED', e.code); process.exit(4); });`);
+  const result = await runShell(`${node} probe.js`, work, live(), 30_000, { sandbox });
+  assert.equal(result.exitCode, 4, result.output);
+  assert.match(result.output, /INSIDE_OK/, 'Node output reaches the result from inside the sandbox');
+  assert.match(result.output, /OUTSIDE_BLOCKED/);
+  assert.match(result.output, /NET_BLOCKED/);
+  assert.ok(!/WARNING: proceeding/.test(result.output));
+  assert.equal(existsSync(outside), false);
+  assert.equal(existsSync(join(work, 'inside.txt')), true);
 });

@@ -26,6 +26,7 @@ const provider: CodexProvider = {
   sandbox() { return 'UI fixture: commands run in the project copy without a model (no real sandbox).'; },
   // UI_FIXTURE_SANDBOX=0 shows the page when the agent cannot run commands.
   async commandAccess() { return process.env.UI_FIXTURE_SANDBOX === '0' ? { available: false, note: 'UI fixture: no sandbox.' } : { available: true, note: 'UI fixture sandbox.' }; },
+  knownAccess() { return process.env.UI_FIXTURE_SANDBOX === '0' ? { available: false, note: 'UI fixture: no sandbox.' } : { available: true, note: 'UI fixture sandbox.' }; },
   async run(request: CodexRunRequest) {
     // Paced like a real turn so the page's progress, reasoning and streaming views can be checked by eye.
     // UI_FIXTURE_PACE=10 slows every step, for screenshots on a slow (software-rendered) browser.

@@ -1,12 +1,14 @@
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { AccountInfo, ModelInfo, Options as SdkOptions, Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { AccountInfo, ModelInfo, Options as SdkOptions, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeAuthStatus, CodexModel, CodexStatus, CommandRun } from '../src/lib/backend-types.ts';
 import type { CodexLogin, CodexProvider, CodexRunRequest, CodexRunResult, CommandAccess } from './provider.ts';
 import { BridgeError, invalid } from './errors.ts';
+import { killTree } from './runner.ts';
 
 type QueryFn = typeof import('@anthropic-ai/claude-agent-sdk')['query'];
 type AuthMethod = ClaudeAuthStatus['method'];
@@ -97,6 +99,12 @@ function modelsOf(models: ModelInfo[] | undefined): CodexModel[] {
  * diagnoses: every tool, MCP server, settings file, hook and @file mention is disabled,
  * and the selected context travels inside the prompt. Writes stay in the file service.
  */
+/** Waits until the process has exited, at most `ms`. */
+function exited(child: ChildProcess, ms: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise(done => { const timer = setTimeout(done, ms); child.once('exit', () => { clearTimeout(timer); done(); }); });
+}
+
 export class ClaudeProvider implements CodexProvider {
   #options: Required<Pick<Options, 'probeTimeoutMs' | 'runTimeoutMs' | 'statusTtlMs'>> & Options;
   #home: string;
@@ -176,18 +184,27 @@ export class ClaudeProvider implements CodexProvider {
     const stop = (reason: Error) => { failure ??= reason; controller.abort(); };
     const onAbort = () => stop(abortError());
     request.signal.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => stop(new Error('Claude Code run timed out')), this.#options.runTimeoutMs);
+    const timer = setTimeout(() => stop(new Error('Claude Code run timed out')), request.timeoutMs ?? this.#options.runTimeoutMs);
     let apiError: string | undefined;
+    // Run mode starts Claude Code itself, in its own process group, so the run can wait for it to end
+    // and end anything it left behind: a background command must not change the copy after the run.
+    let child: ChildProcess | undefined;
+    const spawnOwn = work ? {
+      spawnClaudeCodeProcess: (options: SpawnOptions): SpawnedProcess => {
+        child = spawn(options.command, options.args, { cwd: options.cwd, env: options.env as NodeJS.ProcessEnv, signal: options.signal, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' });
+        return child as unknown as SpawnedProcess;
+      },
+    } : {};
     const execute = async (): Promise<SDKResultMessage | undefined> => {
       const session = query({
         prompt: request.prompt,
         options: this.#sdkOptions(state, {
-          abortController: controller, includePartialMessages: true,
+          abortController: controller, includePartialMessages: true, ...spawnOwn,
           ...(request.model ? { model: request.model } : {}),
           ...(request.outputSchema ? { outputFormat: { type: 'json_schema', schema: request.outputSchema } } : {}),
         }, work),
       });
-      const commands = new Map<string, string>();
+      const commands = new Map<string, string>(), background = new Set<string>();
       let streamed = 0;
       try {
         for await (const message of session) {
@@ -196,7 +213,7 @@ export class ClaudeProvider implements CodexProvider {
           if (message.type === 'assistant' && message.error) apiError = message.error;
           const problem = this.#inspect(message, state, !!work);
           if (problem) { stop(problem); break; }
-          if (work) this.#activity(message, work.dir, commands, request.onEvent);
+          if (work) this.#activity(message, work.dir, commands, background, request.onEvent);
           if (message.type === 'system' && message.subtype === 'api_retry') {
             request.onEvent({ type: 'status', text: `Anthropic API is busy; retrying (${message.attempt}/${message.max_retries})…` });
           } else if (message.type === 'stream_event' && message.parent_tool_use_id === null) {
@@ -214,6 +231,7 @@ export class ClaudeProvider implements CodexProvider {
       } finally {
         // Ends the CLI process however the stream stopped.
         session.close();
+        if (child) { await exited(child, 5_000); killTree(child); }
       }
       return undefined;
     };
@@ -249,7 +267,9 @@ export class ClaudeProvider implements CodexProvider {
   }
 
   /** Run mode needs Claude Code's sandbox; without it Claude Code gets no tools. */
-  async commandAccess(): Promise<CommandAccess> {
+  async commandAccess(): Promise<CommandAccess> { return this.knownAccess(); }
+
+  knownAccess(): CommandAccess {
     if (process.platform === 'win32') return { available: false, note: 'Claude Code has no command sandbox on Windows.' };
     if (process.platform === 'linux') {
       const missing = ['bwrap', 'socat'].filter(name => !onPath(name));
@@ -270,13 +290,14 @@ export class ClaudeProvider implements CodexProvider {
   }
 
   /** Reports commands and edits in the copy to the page. */
-  #activity(message: SDKMessage, workspace: string, commands: Map<string, string>, onEvent: CodexRunRequest['onEvent']): void {
+  #activity(message: SDKMessage, workspace: string, commands: Map<string, string>, background: Set<string>, onEvent: CodexRunRequest['onEvent']): void {
     if (message.type === 'assistant') {
       for (const block of message.message.content) {
         if (block.type !== 'tool_use') continue;
         const input = (block.input ?? {}) as Record<string, unknown>;
         if (block.name === 'Bash' && typeof input.command === 'string') {
           commands.set(block.id, input.command);
+          if (input.run_in_background === true) background.add(block.id);
           onEvent({ type: 'command', command: { id: block.id, command: input.command, status: 'running' } });
         } else if ((block.name === 'Edit' || block.name === 'Write') && typeof input.file_path === 'string') {
           const path = relative(workspace, resolve(workspace, input.file_path)).replace(/\\/g, '/');
@@ -289,10 +310,14 @@ export class ClaudeProvider implements CodexProvider {
         if (block.type !== 'tool_result' || !commands.has(block.tool_use_id)) continue;
         const text = resultText(block.content);
         const exit = /^Exit code (\d+)/.exec(text);
-        const status: CommandRun['status'] = !block.is_error ? 'completed' : exit ? 'failed' : /permission|denied|not allowed|sandbox/i.test(text) ? 'declined' : 'failed';
+        // A background command is still running; its result only says so.
+        const running = !block.is_error && (background.has(block.tool_use_id) || /^Command running in background/i.test(text));
+        const status: CommandRun['status'] = running ? 'running' : !block.is_error ? 'completed' : exit ? 'failed' : /permission|denied|not allowed|sandbox/i.test(text) ? 'declined' : 'failed';
         const output = exit ? text.slice(exit[0].length).replace(/^\n/, '') : text;
-        onEvent({ type: 'command', command: { id: block.tool_use_id, command: commands.get(block.tool_use_id)!, status, exitCode: block.is_error ? (exit ? Number(exit[1]) : null) : 0, output: clip(output) } });
-        commands.delete(block.tool_use_id);
+        // Claude Code reports no exit code for a command that it does not treat as an error (grep
+        // with no match exits 1), so none is claimed.
+        onEvent({ type: 'command', command: { id: block.tool_use_id, command: commands.get(block.tool_use_id)!, status, exitCode: exit ? Number(exit[1]) : null, output: clip(output) } });
+        commands.delete(block.tool_use_id); background.delete(block.tool_use_id);
       }
     }
   }

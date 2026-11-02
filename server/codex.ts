@@ -72,10 +72,11 @@ function runConfig(workspace: string, temp: string): Record<string, unknown> {
 }
 const RUN_OUTPUT = 8 * 1024;
 const clip = (text: string | undefined) => text && text.length > RUN_OUTPUT ? `…${text.slice(-RUN_OUTPUT)}` : text;
-/** The command as the agent wrote it, without the shell wrapper Codex adds. */
+/**
+ * The command as the agent wrote it, without the shell wrapper Codex adds. Codex's commandActions
+ * summary is never used: it drops parts of compound commands (`cd .. && ls` becomes `ls`).
+ */
 function shownCommand(item: Json): string {
-  const actions = Array.isArray(item.commandActions) ? item.commandActions.map(object) : [];
-  if (actions.length === 1 && typeof actions[0].command === 'string' && actions[0].command.trim()) return actions[0].command;
   const raw = string(item.command) ?? '';
   const wrapped = raw.match(/^"?(?:[^"\s]*[\\/])?(?:bash|sh|zsh|pwsh|powershell)(?:\.exe)?"?\s+(?:-lc|-c|-Command|-NoProfile\s+-Command)\s+(['"])([\s\S]*)\1$/i);
   return wrapped ? wrapped[2] : raw;
@@ -107,6 +108,24 @@ function delay(ms: number): Promise<void> { return new Promise(resolve => setTim
 function nested(value: Json, key: string): unknown { return key.split('.').reduce<unknown>((v, part) => object(v)[part], value); }
 function inside(root: string, target: string): boolean { const path = relative(root, target); return path === '' || (!path.startsWith('..') && !isAbsolute(path)); }
 
+/**
+ * The pinned Codex binary for this platform, and the environment its npm launcher would set. Mirrors
+ * this release's official bin/codex.js resolver. Direct spawning matters on Windows: killing a JS
+ * wrapper can leave its native child running and holding authentication/SQLite files.
+ */
+export async function codexBinary(): Promise<{ command: string; version: string; env: Record<string, string> }> {
+  const require = createRequire(import.meta.url);
+  const packagePath = require.resolve('@openai/codex/package.json');
+  const version = string(JSON.parse(await readFile(packagePath, 'utf8')).version) ?? 'unknown';
+  if (version !== PINNED_VERSION) throw new Error(`Expected Codex ${PINNED_VERSION}; adapter must be reviewed before using ${version}`);
+  const platform = `${process.platform}-${process.arch}`, target = TARGETS[platform];
+  if (!target) throw new Error(`Unsupported Codex platform: ${platform}`);
+  const nativePackage = require.resolve(`@openai/codex-${platform}/package.json`);
+  const command = join(dirname(nativePackage), 'vendor', target, 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex');
+  await access(command);
+  return { command, version, env: { CODEX_MANAGED_PACKAGE_ROOT: dirname(packagePath), CODEX_MANAGED_BY_NPM: '1' } };
+}
+
 export class LocalCodexProvider implements CodexProvider {
   #options: Options;
   #home: string;
@@ -117,6 +136,7 @@ export class LocalCodexProvider implements CodexProvider {
   #sequence = 0;
   #run?: ActiveRun;
   #closed = false;
+  #access?: CommandAccess;
   #version?: string;
   #stopping = new Set<Promise<void>>();
   #setup: ((result: Json) => void)[] = [];
@@ -207,7 +227,7 @@ export class LocalCodexProvider implements CodexProvider {
     };
     const onAbort = () => cancel(abortError());
     request.signal.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => cancel(new Error('Codex run timed out')), this.#options.runTimeoutMs);
+    const timer = setTimeout(() => cancel(new Error('Codex run timed out')), request.timeoutMs ?? this.#options.runTimeoutMs);
     try {
       if (request.signal.aborted) cancel(abortError());
       if (active.cancelled) return await completed;
@@ -246,10 +266,13 @@ export class LocalCodexProvider implements CodexProvider {
       clearTimeout(timer);
       request.signal.removeEventListener('abort', onAbort);
       if (active.cancelPromise) await active.cancelPromise;
-      // A command the agent left running in the background outlives the turn. Closing the ephemeral
-      // thread ends it before the service reads the copy; if that fails, the process is restarted.
-      if (workspace && active.threadId && this.#process) {
-        await this.#request('thread/unsubscribe', { threadId: active.threadId }, 5_000).catch(() => this.#stop(new Error('Codex was restarted to end the commands of the last run')));
+      // A command the agent left running in the background outlives the turn, and closing the thread
+      // does not end it. Ending the app-server (and its process tree) does, before the service reads
+      // the copy; the next request starts it again.
+      if (workspace) {
+        if (this.#run === active) this.#run = undefined;
+        if (this.#process) this.#stop(new Error('Codex was restarted to end the commands of the last run'));
+        await Promise.allSettled([...this.#stopping]);
       }
       if (this.#run === active) this.#run = undefined;
     }
@@ -267,12 +290,32 @@ export class LocalCodexProvider implements CodexProvider {
     await this.#ready();
     if (signal.aborted) throw abortError();
     const readiness = string((await this.#request('windowsSandbox/readiness', {})).status);
-    if (readiness === 'ready') return { available: true, note: this.sandbox() };
-    const finished = new Promise<Json>(done => this.#setup.push(done));
-    await this.#request('windowsSandbox/setupStart', { mode: 'unelevated' });
-    const result = await Promise.race([finished, delay(120_000).then(() => ({ success: false, error: 'setup did not finish within two minutes' }) as Json)]);
-    if (result.success === true) return { available: true, note: this.sandbox() };
-    return { available: false, note: `Codex could not set up its Windows sandbox (${string(result.error) ?? 'unknown error'}).` };
+    if (readiness === 'ready') return this.#access = { available: true, note: 'Codex runs each command in its Windows sandbox: it can write only inside the project copy, and has no network access.' };
+    // The wait ends on completion, Stop, the app-server ending, or after two minutes.
+    let done!: (result: Json) => void, timer: ReturnType<typeof setTimeout> | undefined;
+    const finished = new Promise<Json>(resolve => { done = resolve; });
+    const onAbort = () => done({ success: false, error: 'cancelled', cancelled: true });
+    this.#setup.push(done);
+    signal.addEventListener('abort', onAbort, { once: true });
+    let result: Json;
+    try {
+      const started = await this.#request('windowsSandbox/setupStart', { mode: 'unelevated' });
+      if (started.started === false) return this.#access = { available: false, note: 'Codex could not start setting up its Windows sandbox.' };
+      timer = setTimeout(() => done({ success: false, error: 'setup did not finish within two minutes' }), 120_000);
+      result = await finished;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      this.#setup = this.#setup.filter(waiter => waiter !== done);
+    }
+    if (result.cancelled === true) throw abortError();
+    if (result.success === true) return this.#access = { available: true, note: 'Codex runs each command in its Windows sandbox: it can write only inside the project copy, and has no network access.' };
+    return this.#access = { available: false, note: `Codex could not set up its Windows sandbox (${string(result.error) ?? 'unknown error'}).` };
+  }
+
+  /** On Windows the sandbox is known only after the first request has checked or set it up. */
+  knownAccess(): CommandAccess | undefined {
+    return process.platform !== 'win32' ? { available: true, note: this.sandbox() } : this.#access;
   }
 
   async close(): Promise<void> {
@@ -298,28 +341,16 @@ export class LocalCodexProvider implements CodexProvider {
     try {
       await Promise.all([mkdir(this.#home, { recursive: true }), mkdir(this.#cwd, { recursive: true })]);
       if (this.#closed) throw new Error('Codex provider is closed');
-      let command = process.execPath, packageRoot: string | undefined;
+      let command = process.execPath, managed: Record<string, string> = {};
       if (!this.#options.processFactory) {
-        const require = createRequire(import.meta.url);
-        const packagePath = require.resolve('@openai/codex/package.json');
-        const metadata = JSON.parse(await readFile(packagePath, 'utf8'));
-        this.#version = string(metadata.version);
-        if (this.#version !== PINNED_VERSION) throw new Error(`Expected Codex ${PINNED_VERSION}; adapter must be reviewed before using ${this.#version}`);
-        const platform = `${process.platform}-${process.arch}`, target = TARGETS[platform];
-        if (!target) throw new Error(`Unsupported Codex platform: ${platform}`);
-        packageRoot = dirname(packagePath);
-        const nativePackage = require.resolve(`@openai/codex-${platform}/package.json`);
-        // Mirrors this pinned npm release's official bin/codex.js resolver.
-        // Direct spawning matters on Windows: killing a JS wrapper can leave
-        // its native child running and holding authentication/SQLite files.
-        command = join(dirname(nativePackage), 'vendor', target, 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex');
-        await access(command);
+        const binary = await codexBinary();
+        this.#version = binary.version; command = binary.command; managed = binary.env;
       }
       const env: NodeJS.ProcessEnv = { ...(this.#options.testLaunch?.env ?? process.env), CODEX_HOME: this.#home };
       for (const key of ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_IDENTITY_TOKEN_FILE', 'OPENAI_FEDERATION_RULE_ID', 'OPENAI_WORKLOAD_IDENTITY_CONTEXT']) delete env[key];
-      if (packageRoot) {
+      if (Object.keys(managed).length) {
         for (const key of ['CODEX_MANAGED_BY_BUN', 'CODEX_MANAGED_BY_PNPM', 'CODEX_MANAGED_BY_VITE_PLUS']) delete env[key];
-        env.CODEX_MANAGED_PACKAGE_ROOT = packageRoot; env.CODEX_MANAGED_BY_NPM = '1';
+        Object.assign(env, managed);
       }
       const settings = { ...this.#options.testLaunch?.config, ...SETTINGS };
       const args = ['app-server', '--listen', 'stdio://', ...Object.entries(settings).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`])];
@@ -501,6 +532,7 @@ export class LocalCodexProvider implements CodexProvider {
   #stop(reason: Error): void {
     const child = this.#process;
     this.#process = undefined;
+    for (const done of this.#setup.splice(0)) done({ success: false, error: reason.message });
     for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(reason); }
     this.#pending.clear();
     if (this.#run) { this.#run.terminal = true; this.#run.reject(reason); }

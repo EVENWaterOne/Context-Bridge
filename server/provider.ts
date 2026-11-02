@@ -15,6 +15,8 @@ export interface CodexRunRequest {
    * edit and run commands in it, without network access. Without it the agent has no tools at all.
    */
   workspace?: string;
+  /** The time left for this run; the adapter's own limit applies when it is not given. */
+  timeoutMs?: number;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
 }
@@ -35,4 +37,6 @@ export interface CodexProvider {
    * test command runs.
    */
   commandAccess?(signal: AbortSignal): Promise<CommandAccess>;
+  /** What commandAccess would say, when that is known without preparing anything (for the page). */
+  knownAccess?(): CommandAccess | undefined;
 }

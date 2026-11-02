@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { lstatSync, readFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { constants, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, relative, sep } from 'node:path';
 import type { Task } from '../src/lib/workflow.ts';
 import { filePath } from './store.ts';
 import { decodeText, ignored, safeRelative, secret } from './files.ts';
@@ -37,6 +37,15 @@ const MAX_BYTES = 300 * 1024 * 1024;
 const MAX_FILE = 100 * 1024 * 1024;
 const HASHED = 8 * 1024 * 1024;
 const MAX_OTHER = 50;
+const MAX_TEXT = 1024 * 1024;
+// Besides the files the file service never reads, a whole-project copy also leaves out common
+// credential and key files, so an agent that searches the project cannot send them to its model.
+const COPY_SECRET = /^(\.npmrc|\.netrc|_netrc|\.pypirc|\.git-credentials|\.envrc|\.htpasswd|.*\.(pem|key|p12|pfx|keystore|jks|ppk)|client_secret.*\.json|token\.json|service[-_]?account.*\.json|.*credentials.*\.json|.*[_-]secrets?\.(py|json|ya?ml|toml|ini|txt|cfg|conf))$/i;
+// Arduino's convention for Wi-Fi passwords and keys (arduino_secrets.h, wifi_secrets.h …). The sketch
+// includes it, so the copy keeps the names with empty values: the code still compiles and the values
+// never leave the computer.
+const ARDUINO_SECRETS = /^(.*[_-])?secrets?\.(h|hpp)$/i;
+const redact = (text: string) => text.split('\n').map(line => /^\s*#\s*include\b/.test(line) ? line : line.replace(/"(?:[^"\\\n]|\\.)*"/g, '""')).join('\n');
 
 function aborted(signal?: AbortSignal): void { if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError'); }
 function folderName(task: Task): string {
@@ -59,9 +68,13 @@ export async function createWorkCopy(task: Task, parent: string, signal?: AbortS
   const dir = join(parent, folderName(task));
   await mkdir(dir, { recursive: true });
   const manifest = new Map<string, string>(), skipped: string[] = [];
+  // Selected files are written from the task below (their text is in the prompt anyway).
+  const own = new Set(task.files.map(f => filePath(f)));
   if (task.rootPath) {
     const root = task.rootPath;
-    if (await realpath(root) !== root) throw conflict('Project root moved or was replaced. Link it again.');
+    // The same function that recorded rootPath when the folder was linked; the native one can return
+    // another spelling of the same folder on Windows (drive letter case, mapped drives).
+    if (realpathSync(root) !== root) throw conflict('Project root moved or was replaced. Link it again.');
     let entries = 0, bytes = 0;
     const walk = async (source: string, prefix: string, depth: number): Promise<void> => {
       if (depth > 30) { skipped.push(`${prefix} (nested too deeply)`); return; }
@@ -77,8 +90,20 @@ export async function createWorkCopy(task: Task, parent: string, signal?: AbortS
           continue;
         }
         if (!entry.isFile()) continue;
-        if (secret.test(entry.name)) { skipped.push(`${rel} (may hold credentials)`); continue; }
-        const from = join(source, entry.name), stat = await lstat(from);
+        const from = join(source, entry.name);
+        if (own.has(rel)) continue;
+        if (ARDUINO_SECRETS.test(entry.name)) {
+          const stat = await lstat(from);
+          if (stat.size <= MAX_TEXT) {
+            const text = redact(await readFile(from, 'utf8'));
+            await writeFile(at(dir, rel), text, 'utf8');
+            manifest.set(rel, textPrint(text));
+            skipped.push(`${rel} (copied with its values removed)`);
+          } else skipped.push(`${rel} (may hold credentials)`);
+          continue;
+        }
+        if (secret.test(entry.name) || COPY_SECRET.test(entry.name)) { skipped.push(`${rel} (may hold credentials)`); continue; }
+        const stat = await lstat(from);
         if (stat.size > MAX_FILE) { skipped.push(`${rel} (larger than 100 MB)`); continue; }
         bytes += stat.size;
         if (bytes > MAX_BYTES) throw invalid('The project folder holds more than 300 MB to copy. Link a smaller project folder, or turn off Run code.');
@@ -113,7 +138,7 @@ export async function listProject(task: Task): Promise<{ paths: string[]; read: 
         if (++entries > MAX_ENTRIES) return;
         const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
         if (entry.isDirectory() && !SKIP.has(entry.name.toLowerCase())) await walk(join(source, entry.name), rel, depth + 1);
-        else if (entry.isFile() && !secret.test(entry.name)) paths.add(rel);
+        else if (entry.isFile() && !secret.test(entry.name) && !COPY_SECRET.test(entry.name)) paths.add(rel);
       }
     };
     await walk(root, '', 0);
@@ -138,16 +163,41 @@ export async function writeChanges(copy: WorkCopy, changes: { path: string; afte
   }
 }
 
+/**
+ * Reads one file the agent may have replaced. The agent controls its copy, so the file must still be
+ * a regular file at that exact place, with no link anywhere on its path (a link could point at saved
+ * keys), and small enough to be text. A FIFO or device is never opened.
+ */
+async function readOwn(copy: WorkCopy, rel: string): Promise<Buffer | 'missing' | 'refused'> {
+  const path = at(copy.dir, rel);
+  let stat;
+  try { stat = await lstat(path); } catch { return 'missing'; }
+  if (!stat.isFile()) return 'refused';
+  if (stat.size > MAX_TEXT) return 'refused';
+  const [root, real] = await Promise.all([realpath(copy.dir), realpath(path).catch(() => '')]);
+  const inside = relative(root, real);
+  const expected = rel.split('/').join(sep);
+  if (process.platform === 'win32' ? inside.toLowerCase() !== expected.toLowerCase() : inside !== expected) return 'refused';
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) return 'refused';
+    const buffer = Buffer.alloc(MAX_TEXT + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return bytesRead > MAX_TEXT ? 'refused' : buffer.subarray(0, bytesRead);
+  } finally { await handle.close(); }
+}
+
 /** Reads what the agent changed in its copy: selected files become the proposal, anything else is listed. */
 export async function readEdits(task: Task, copy: WorkCopy, signal?: AbortSignal): Promise<WorkEdits> {
   const selected = task.files.filter(f => f.includeInContext !== false);
   const selectedPaths = new Set(selected.map(f => filePath(f)));
   const changes: WorkEdits['changes'] = [], other: string[] = [];
   for (const file of selected) {
+    aborted(signal);
     const rel = filePath(file);
-    let bytes: Buffer;
-    try { bytes = await readFile(at(copy.dir, rel)); }
-    catch { other.push(`${rel} (deleted; Apply never deletes files)`); continue; }
+    const bytes = await readOwn(copy, rel).catch(() => 'refused' as const);
+    if (bytes === 'missing') { other.push(`${rel} (deleted; Apply never deletes files)`); continue; }
+    if (bytes === 'refused') throw invalid(`${rel} in the working copy is no longer a regular text file up to 1 MB (it was replaced by a link, folder or special file).`);
     let text: string;
     try { text = decodeText(bytes); }
     catch { throw invalid(`${rel} is no longer UTF-8 text up to 1 MB after the edits in the working copy.`); }
@@ -190,28 +240,38 @@ const FQBN: Record<string, string> = {
   'Raspberry Pi + ESP32': 'esp32:esp32:esp32',
   STM32F103C8T6: 'STMicroelectronics:stm32:GenF1:pnum=BLUEPILL_F103C8',
 };
+// Sketch folders become part of a shell command. Only plain names are used, so no shell (sh or
+// cmd.exe) can read anything in them as syntax; other sketches are left for the user to type.
+const PLAIN_PATH = /^[\p{L}\p{N} _.\-/()+]+$/u;
 const quoted = (path: string) => /^[\w./-]+$/.test(path) ? path : `"${path}"`;
+const python = () => process.platform === 'win32' ? 'py -3' : 'python3';
 
 /**
- * A build or test command for the project, when one is evident: PlatformIO, an Arduino sketch for a
- * controller with a known board ID, an npm test script or pytest tests. The user can replace it.
+ * A build or test command for the project, when one is evident: PlatformIO (build only), an Arduino
+ * sketch for a controller with a known board ID, an npm test script or a pytest configuration. It is
+ * only a suggestion: nothing runs it until the user confirms it as the task's command.
  */
 export function detectCommand(task: Task, paths: string[], read: (rel: string) => string | undefined): string | undefined {
-  if (paths.includes('platformio.ini')) return 'pio run';
+  // An explicit target: a `targets = upload` default in platformio.ini must never flash the board.
+  if (paths.includes('platformio.ini')) return 'pio run -t checkprogsize';
+  const selected = task.files.filter(f => f.includeInContext !== false).map(f => filePath(f));
   const fqbn = FQBN[task.hardware.controller];
   if (fqbn) {
     const root = folderName(task);
     const sketches = [...new Set(paths.flatMap(path => {
       const parts = path.split('/'), name = parts.at(-1)!;
       if (!/\.ino$/i.test(name)) return [];
+      // Library examples are not the user's sketch.
+      if (parts.slice(0, -1).some(part => /^(libraries|examples)$/i.test(part))) return [];
       const folder = parts.length > 1 ? parts.at(-2)! : root;
       if (folder.toLowerCase() !== name.slice(0, -4).toLowerCase()) return [];
       return [parts.slice(0, -1).join('/') || '.'];
-    }))].filter(path => !path.includes('"'));
-    const chosen = task.files.filter(f => f.includeInContext !== false).map(f => filePath(f)).filter(path => /\.ino$/i.test(path)).map(path => path.split('/').slice(0, -1).join('/') || '.');
-    const preferred = sketches.filter(path => chosen.includes(path));
-    const list = (preferred.length ? preferred : sketches).slice(0, 3);
-    if (list.length) return list.map(path => `arduino-cli compile --fqbn ${fqbn} ${quoted(path)}`).join(' && ');
+    }))].filter(path => PLAIN_PATH.test(path) && !path.startsWith('-'));
+    // The sketch that holds a selected file (.ino, .h, .cpp …) is the one the change can break.
+    const holds = (sketch: string, file: string) => sketch === '.' ? !file.includes('/') : file.startsWith(`${sketch}/`);
+    const preferred = sketches.filter(sketch => selected.some(file => holds(sketch, file)));
+    const list = preferred.length ? preferred : selected.length && selected.some(file => /\.(ino|h|hpp|c|cpp)$/i.test(file)) ? [] : sketches.length === 1 ? sketches : [];
+    if (list.length) return list.slice(0, 3).map(path => `arduino-cli compile --fqbn ${fqbn} ${quoted(path)}`).join(' && ');
   }
   if (paths.includes('package.json')) {
     try {
@@ -219,6 +279,13 @@ export function detectCommand(task: Task, paths: string[], read: (rel: string) =
       if (typeof test === 'string' && test.trim() && !/no test specified/i.test(test)) return 'npm test';
     } catch { /* not a usable package.json */ }
   }
-  if (paths.some(path => /(^|\/)(test_[^/]*\.py|[^/]*_test\.py|conftest\.py|pytest\.ini)$/i.test(path))) return `${process.platform === 'win32' ? 'py -3' : 'python3'} -m pytest -q`;
+  // pytest only from its own configuration or from tests that import it: a hardware script named
+  // test_servo.py is not a test suite, and pytest would run it while collecting.
+  if (paths.some(path => /(^|\/)(conftest\.py|pytest\.ini)$/i.test(path))) return `${python()} -m pytest -q`;
+  for (const config of ['pyproject.toml', 'setup.cfg', 'tox.ini']) {
+    if (paths.includes(config) && /^\[(tool\.pytest[^\]]*|tool:pytest|pytest)\]/m.test(read(config) ?? '')) return `${python()} -m pytest -q`;
+  }
+  const tests = paths.filter(path => /(^|\/)(test_[^/]*|[^/]*_test)\.py$/i.test(path)).slice(0, 20);
+  if (tests.some(path => /^\s*(import pytest|from pytest import)/m.test(read(path) ?? ''))) return `${python()} -m pytest -q`;
   return undefined;
 }

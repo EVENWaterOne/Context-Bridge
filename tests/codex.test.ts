@@ -223,7 +223,7 @@ test('real paths outside application-owned snapshots are rejected', async t => {
 });
 function dirnameForTest(path: string): string { return join(path, '..'); }
 
-test('run mode: the thread gets a sandbox that writes only the copy, commands and edits are reported, and the thread is closed', async t => {
+test('run mode: the thread gets a sandbox that writes only the copy, commands and edits are reported, and Codex is restarted to end background commands', async t => {
   const fixture = await setup(t, 'run');
   const workspace = join(fixture.snapshot, 'work', 'arm_project'); await mkdir(workspace, { recursive: true });
   const events: { type: string; text?: string; command?: Record<string, unknown> }[] = [];
@@ -239,12 +239,14 @@ test('run mode: the thread gets a sandbox that writes only the copy, commands an
   assert.equal(start.config['shell_environment_policy.inherit'], 'core');
   assert.match(start.baseInstructions, /private copy of the user's project/);
   assert.deepEqual(turn.sandboxPolicy, { type: 'workspaceWrite', writableRoots: [real, temp], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true });
-  assert.ok(messages.some(m => m.method === 'thread/unsubscribe' && m.params.threadId === 'thread-1'), 'Background commands end with the thread');
   assert.deepEqual(events.filter(e => e.type === 'command').map(e => e.command), [
     { id: 'call_1', command: 'node check.js', status: 'running' },
     { id: 'call_1', command: 'node check.js', status: 'failed', exitCode: 1, output: 'too slow 3\n', durationMs: 40 },
   ]);
   assert.ok(events.some(e => e.type === 'status' && e.text === 'Codex edited motion.py in the project copy'));
+  // Closing the thread does not end a background command, so the app-server ends after each run-mode run.
+  await fixture.provider.run({ ...fixture.request(), workspace, onEvent: () => {} });
+  assert.equal((await fixture.requests()).filter(m => m.method === 'initialize').length, 2, 'The next request starts a fresh app-server');
 });
 
 for (const mode of ['runwarning', 'runnet']) test(`${mode}: run mode stops when Codex did not apply the sandbox settings`, async t => {

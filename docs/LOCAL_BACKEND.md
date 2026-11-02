@@ -42,18 +42,21 @@
 - Undo 检查文件仍处于刚应用后的版本；后续手动编辑、任务重新绑定工程都会阻止不安全撤销。已完成轮次不能重新 Apply。新轮次需新诊断。
 - Ask BIT 按任务保存会话。聊天只解释、不写文件；需要修改时走诊断和 Review。开启“使用历史”（默认）时，聊天里说过的内容也会带进下一次诊断，不用再重复。关闭“使用历史”会排除先前轮次和聊天上下文，使用新的 Codex thread 或 Claude Code 会话，避免旧内容暗中进入请求。
 
-机械臂动画只展示流程，不执行修改后的代码。任何情况下都不会烧录固件、打开串口或驱动机械臂；实物反馈由使用者根据实际观察填写，界面不会把动画播放当作验证通过。
+机械臂动画只展示流程，不执行修改后的代码。服务本身从不烧录固件、不打开串口。运行模式下，模型被明确要求不烧录、不开串口，命令也都在没有网络的沙箱里执行（Linux 沙箱里没有串口设备）；但这是指令加沙箱，不是每个系统上的硬保证，想百分之百放心就先拔掉机械臂。实物反馈由使用者根据实际观察填写，界面不会把动画播放当作验证通过。
 
 ## 诊断时运行代码
 
 每个任务默认开启。Request 页有 **Yes, run code / Read only** 开关和 **Build or test command**（编译或测试命令）输入框。开启后：
 
-- 服务把绑定的工程目录复制到本次任务自己的目录（`.data/runs/<job>/work/<工程目录名>`，保留目录名，Arduino 要求 sketch 目录名和 `.ino` 同名）。链接、像凭证的文件（`.env`、密钥等）、`.git`、`node_modules`、构建输出和缓存不复制。副本里选中文件的内容就是发给模型的内容。
-- 模型（Codex 或 Claude Code）在副本里工作：可以读工程里任何文件，运行 `arduino-cli compile`、`pio run`、`npm test`、`pytest` 这类命令，并修改文件。每条命令都在提供方的系统沙箱里执行：只能写副本和一个临时目录，没有网络。页面实时显示每条命令、退出码和输出。
-- 提案就是模型在副本里对**选中文件**的修改，由服务读回；改了其他文件只会列出来，永远不会被 Apply。Apply 仍然只把审阅过的文本写回真实工程。
-- **验证命令**用你填的命令，没填就自动识别：PlatformIO → `pio run`；控制器是 Arduino Uno、ESP32 或 STM32F103C8T6 且有 sketch → `arduino-cli compile --fqbn …`；有真正的 npm test 脚本 → `npm test`；有 pytest 测试文件 → `python -m pytest`（Windows 用 `py -3`）。服务自己在另一个副本里运行它两次：模型开始前一次（结果写进提示词），出提案后对**完全相同的提案文本**再跑一次。原来能通过、改完不通过时，把失败输出发回模型修正一次（还在同一个副本里）。命令没安装时标为“无法运行”，不算代码的错。验证命令像你在终端里对副本执行一样运行（不在沙箱里），去掉模型密钥环境变量，限时 5 分钟，超时或取消会结束整个进程树。
-- 提供方的沙箱不可用时，模型不拿工具，照旧给出完整文件文本；验证命令仍在改前改后各跑一次。Codex 在 Windows 上首次使用时自行设置沙箱（`unelevated`，不需要管理员）；Claude Code 在原生 Windows 上没有沙箱，Linux 上需要 PATH 里有 `bubblewrap` 和 `socat`（macOS 自带）。页面会说明当前情况。**Windows 上的 Codex 沙箱尚未实测。**
-- 需要知道的限制：沙箱里的命令仍能读取当前系统用户能读的副本外文件（Codex / Claude Code 命令行本身也是这样）。Claude Code 的命令额外看不到数据目录（保存的 key、其他任务）；Codex 的命令只拿到最小环境变量，没有 API key。选 **Read only** 即可对该任务关闭以上全部功能。运行模式的任务时限是 20 分钟。
+- 服务把绑定的工程目录复制到本次任务自己的目录（`.data/runs/<job>/work/<工程目录名>`，保留目录名，Arduino 要求 sketch 目录名和 `.ino` 同名）。链接、`.git`、`node_modules`、构建输出、缓存和凭证类文件（`.env`、`.npmrc`、`.netrc`、密钥和证书、`*credentials*.json`、`*_secrets.*` 等）不复制。Arduino 的 `arduino_secrets.h` / `secrets.h` 会复制，但引号里的值被清空，sketch 照样能编译，Wi-Fi 密码不会进副本。副本里选中文件的内容就是发给模型的内容。任务结束后所有副本都会删除。
+- 模型（Codex 或 Claude Code）在副本里工作：可以读副本里任何文件（包括没勾选的），运行 `arduino-cli compile`、`pio run`、`npm test`、`pytest` 这类命令，并修改文件。每条命令都在提供方的系统沙箱里执行：只能写副本和一个临时目录，没有网络。页面实时显示每条命令、退出码和输出。
+- 提案就是模型在副本里对**选中文件**的修改，由服务读回（选中文件被换成链接、目录或特殊文件时直接拒绝，不跟随）。改了其他文件只会列出来，永远不会被 Apply。Apply 仍然只把审阅过的文本写回真实工程。
+- **验证命令**只用你为这个任务保存的命令。服务会根据工程给出建议，但要你点一次 **Use this command**（或自己填）之后才会运行：PlatformIO → `pio run -t checkprogsize`（只编译的明确目标，platformio.ini 里写了 `targets = upload` 也不会烧录）；控制器是 Arduino Uno、ESP32 或 STM32F103C8T6 → 对含有选中文件的 sketch 运行 `arduino-cli compile --fqbn …`（跳过库示例和含特殊字符的目录名）；有真正的 npm test 脚本 → `npm test`；有 pytest 配置或 `import pytest` 的测试文件 → `python -m pytest`（Windows 用 `py -3`）。只叫 `test_servo.py` 的硬件脚本不算测试。
+- 服务自己在另一个副本里运行验证命令两次：模型开始前一次（结果写进提示词），出提案后对**完全相同的提案文本**再跑一次。它运行在 Codex 的系统沙箱里（固定版本 Codex 包里的 `codex sandbox`，选哪个提供方都一样）：只能写检查副本和它的临时目录（Arduino、PlatformIO、Python 的编译缓存都改到这里），没有网络。工程自己的 `.venv`/`venv` 和 `node_modules` 会加进 PATH，只读。去掉模型密钥环境变量，限时 5 分钟，超时或取消会结束整个进程树。这个沙箱不可用时验证命令不运行，任务步骤里会写明。
+- 原来能通过、改完不通过时，把失败输出发回模型修正一次（还在同一个副本里）。改之前就失败的命令显示为环境问题（缺工具、板卡包或库），不算 BIT 改动的错；命令或 pytest 没安装时标为“无法运行”。
+- 提供方的沙箱不可用时，模型不拿工具，照旧给出完整文件文本；验证命令仍在改前改后各跑一次。两者都没有时，这次请求等同 Read only，页面会直接说明。Codex 在 Windows 上首次使用时自行设置沙箱（`unelevated`，不需要管理员）；Claude Code 在原生 Windows 上没有沙箱，Linux 上需要 PATH 里有 `bubblewrap` 和 `socat`（macOS 自带）。
+- 需要知道的限制：沙箱里的命令仍能读取当前系统用户能读的副本外文件（Codex / Claude Code 命令行本身也是这样）。Claude Code 的命令额外看不到数据目录（保存的 key、其他任务）；Codex 的命令只拿到最小环境变量，没有 API key。Arduino 和 PlatformIO 的板卡包需要事先装好（沙箱没有网络，不能下载）。如果工程用 `pip install -e` 以可编辑方式装进了虚拟环境，测试可能导入真实工程里的文件而不是副本。选 **Read only** 即可对该任务关闭以上全部功能。运行模式的任务时限是 20 分钟。
+- 已在 Linux 上用真实的 Codex 和 Claude Code 程序配合本地模拟的模型接口实测。**Windows、macOS 上的沙箱，以及沙箱里的 `arduino-cli`/`pio` 编译，尚未实测。**
 
 ## 旧数据、取消与恢复
 
@@ -82,13 +85,13 @@
 | `POST /api/tasks/:id/project/scan` | `{path}` → 根目录 ID、文件清单、跳过原因 |
 | `POST /api/tasks/:id/project/bind` | `{rootId,paths}` → 权威工作区 |
 | `POST /api/tasks/:id/project/refresh` | 从已绑定的实际文件更新快照 |
-| `GET /api/tasks/:id/execution` | `{enabled,command?,detected?,sandbox}`：是否运行代码、你填的验证命令、自动识别的命令、当前提供方的沙箱说明 |
+| `GET /api/tasks/:id/execution` | `{enabled,command?,detected?,sandbox,tools?,checker}`：是否运行代码、你保存的验证命令、建议的命令（不会自动运行）、当前提供方的沙箱说明、模型能否运行命令（`{available,note}`，Windows 上的 Codex 在第一次请求前未知）、验证命令的沙箱是否可用 |
 | `PUT /api/tasks/:id/execution` | `{enabled:boolean,command?:string|null}` → 权威工作区；命令须为一行、最多 2000 字符；浏览器保存工作区和导入都不能改这项设置 |
 | `POST /api/agent/investigate` | `{taskId,roundId,model?,provider?,answer?,proceed?}` → 202 job；`answer`（最多 20,000 字）是对上次问题的回答，保存进本轮 `clarifications`；`proceed:true` 要求不再追问、直接给出尽力而为的提案；`provider` 与当前不符时 409 `PROVIDER_CHANGED`，省略时按 `codex`（旧页面只认识 Codex） |
 | `POST /api/agent/chat` | `{taskId,message,model?,provider?}` → 202 job；同上 |
 | `GET /api/tasks/:id/messages` | 当前任务持久化聊天 |
 | `GET /api/jobs/:id` | 已持久化的任务状态 |
-| `GET /api/jobs/:id/events` | SSE：`event: job`，data 为完整 job；终态后关闭。job 含 `message`（当前步骤）、`activity`（按时间的步骤记录，最多 60 条）、`reasoning`（模型发来的推理摘要，可能为空）、`text`（流式输出）和运行模式下的 `commands`（模型在副本里执行的命令，最近 20 条） |
+| `GET /api/jobs/:id/events` | SSE：`event: job`，data 为完整 job；终态后关闭。job 含 `message`（当前步骤）、`activity`（按时间的步骤记录，最多 60 条）、`reasoning`（模型发来的推理摘要，可能为空）、`text`（流式输出）和运行模式下的 `commands`（模型在副本里执行的命令，最近 20 条）与 `commandCount`（总条数） |
 | `POST /api/jobs/:id/cancel` | 中断真实任务；最终状态以 job 终态为准 |
 | `POST /api/agent/apply` | `{taskId,roundId,suggestionId,idempotencyKey}` → 操作 ID、变更文件、权威工作区 |
 | `POST /api/operations/:id/undo` | `{idempotencyKey}` → 撤销结果和权威工作区 |
@@ -103,7 +106,7 @@ npm run build
 npm run doctor
 ```
 
-运行模式另有两项真实程序测试（只在 Linux/macOS 上运行）：`tests/backend.test.ts` 用本机模拟的 Responses API 驱动真实 Codex 0.164.0，确认命令真的在副本里执行、`apply_patch` 的修改成为提案、写真实工程和联网被沙箱挡住、改前改后的验证命令都跑了、Apply 后才写入；`tests/claude-binary.test.ts` 用模拟的 Messages API 驱动真实 Claude Code，在沙箱可用（PATH 里有 bubblewrap 和 socat）时确认同样的事，并确认命令读不到保存的 key、环境变量里没有 key，否则跳过。
+运行模式另有两项真实程序测试（只在 Linux/macOS 上运行）：`tests/backend.test.ts` 用本机模拟的 Responses API 驱动真实 Codex 0.164.0，确认命令真的在副本里执行、`apply_patch` 的修改成为提案、写真实工程和联网被沙箱挡住、改前改后的验证命令都在 `codex sandbox` 里跑了、Apply 后才写入；`tests/runner.test.ts` 在 Linux 上确认验证命令沙箱的输出和退出码能带回、写副本外和联网都失败；`tests/claude-binary.test.ts` 用模拟的 Messages API 驱动真实 Claude Code，在沙箱可用（PATH 里有 bubblewrap 和 socat）时确认同样的事，并确认命令读不到保存的 key、环境变量里没有 key，否则跳过。
 
 自动测试使用隔离临时目录和 FakeProvider，覆盖 API、真实文件替换、冲突、取消、崩溃恢复、Codex 子进程协议和 Claude Code 适配器（模拟 SDK）。`tests/claude-binary.test.ts` 用本机模拟的 Messages API 运行真实 Claude Code 二进制，确认无工具、`@文件` 不展开、数据目录路径不出现在请求里、只发出一次请求、拒答不重试也不换模型、key 被拒几秒内失败、取消会结束进程；其他连接都被本机代理拒绝，不使用任何 Anthropic 账号或网络。Windows 管理沙箱可能禁止覆盖式 rename/junction；应在正常本机权限下运行文件测试，不能因此降级原子写入保护。真实调用验收需先完成正常 Codex 登录或配置 Anthropic API key，应单独记录，不能把 FakeProvider 或模拟 API 通过描述为真实模型成功。
 

@@ -258,3 +258,34 @@ test('run mode with the bundled Claude Code binary: commands run sandboxed in th
   assert.match(String(commands[5]?.[1]), /declined|failed/);
   assert.ok(events.some(event => event.type === 'status' && /editing motion\.py in the project copy/.test(event.text ?? '')));
 });
+
+test('run mode with the bundled Claude Code binary: a command left running in the background stops writing to the copy when the run ends', { timeout: 120_000 }, async t => {
+  const probe = new ClaudeProvider({ dataDir: join(tmpdir(), 'context-bridge-unused') });
+  const access = await probe.commandAccess();
+  if (!access.available) { t.skip(access.note); return; }
+  const { provider, directory } = await setup(t);
+  const data = join(directory, 'data'), snapshot = join(data, 'runs', 'job'), workspace = join(snapshot, 'work', 'arm_project');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, 'motion.py'), 'return_duration = 0.6\n');
+  const turns: Turn[] = [];
+  const api = await scriptedApi(t, turns);
+  turns.push(
+    { tool: 'Bash', input: { command: 'while true; do echo tick >> ticks.txt; sleep 0.1; done', description: 'Keep writing', run_in_background: true } },
+    { tool: 'Bash', input: { command: 'sleep 1; grep -c tick ticks.txt; grep -q nomatch ticks.txt', description: 'Count ticks' } },
+    { tool: 'StructuredOutput', input: { outcome: 'proposal', title: 'T', summary: 'S', rationale: 'R', evidence: [], questions: [], risk: 'K' } },
+  );
+  await provider.close();
+  const runner = new ClaudeProvider({ dataDir: data, apiBaseUrl: api.url });
+  t.after(() => runner.close());
+  const events: { type: string; command?: { command: string; status: string; exitCode?: number | null } }[] = [];
+  await runner.run({ prompt: 'Diagnose.', snapshotDir: snapshot, workspace, outputSchema: runOutputSchema, signal: new AbortController().signal, onEvent: event => events.push(event as never) });
+  const commands = events.filter(event => event.type === 'command').map(event => [event.command!.command.slice(0, 10), event.command!.status, event.command!.exitCode]);
+  assert.deepEqual(commands[1], ['while true', 'running', null], 'A background command is reported as still running, not as finished with exit code 0');
+  // Claude Code does not treat grep without a match (exit 1) as an error and reports no exit code, so none is claimed.
+  assert.deepEqual(commands[3], ['sleep 1; g', 'completed', null]);
+  const size = async () => (await readFile(join(workspace, 'ticks.txt'), 'utf8').catch(() => '')).length;
+  const first = await size();
+  assert.ok(first > 0, 'The background command ran');
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(await size(), first, 'Nothing writes to the copy after the run returned');
+});

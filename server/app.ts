@@ -9,8 +9,9 @@ import { ProviderSwitch, isProviderId, type ProviderFactory } from './providers.
 import { ClaudeProvider } from './claude.ts';
 import { Store } from './store.ts';
 import { FileService } from './files.ts';
-import { Jobs, commandFor } from './jobs.ts';
+import { Jobs, detectCommand } from './jobs.ts';
 import { listProject } from './workcopy.ts';
+import type { Sandbox } from './runner.ts';
 import { filePath } from './store.ts';
 import { BridgeError, conflict, invalid, missing } from './errors.ts';
 
@@ -28,7 +29,7 @@ export interface AppOptions {
   fileFault?: (phase: 'after-write', index: number) => void;
   timeoutMs?: number;
   /** Run code while diagnosing: the default for tasks without a saved choice (on), and its time limit. */
-  runCode?: { byDefault?: boolean; timeoutMs?: number };
+  runCode?: { byDefault?: boolean; timeoutMs?: number; sandbox?: () => Promise<Sandbox | undefined> };
 }
 export async function createApp(options: AppOptions) {
   const dataDir = resolve(options.dataDir);
@@ -136,9 +137,11 @@ export async function createApp(options: AppOptions) {
     const task = store.task(params(request.params).id);
     const listed = await listProject(task);
     const own = new Map(task.files.map(f => [filePath(f), f.content]));
-    const detected = commandFor({ ...task, execution: undefined }, listed.paths, rel => own.get(rel) ?? listed.read(rel));
+    const detected = detectCommand(task, listed.paths, rel => own.get(rel) ?? listed.read(rel));
     const active = await provider.provider().catch(() => undefined);
-    return { enabled: jobs.runsCode(task), ...(task.execution?.command ? { command: task.execution.command } : {}), ...(detected ? { detected: detected.text } : {}), sandbox: active?.sandbox?.() ?? `${provider.label} runs commands in the project copy.` };
+    const tools = active ? active.knownAccess?.() ?? (active.commandAccess ? undefined : { available: false, note: `${provider.label} cannot run commands in this service.` }) : undefined;
+    const checker = !!(await jobs.sandbox().catch(() => undefined));
+    return { enabled: jobs.runsCode(task), ...(task.execution?.command ? { command: task.execution.command } : {}), ...(detected ? { detected } : {}), sandbox: active?.sandbox?.() ?? `${provider.label} runs commands in the project copy.`, ...(tools ? { tools } : {}), checker };
   });
   app.put('/api/tasks/:id/execution', async request => {
     const b = body(request.body), id = params(request.params).id;
