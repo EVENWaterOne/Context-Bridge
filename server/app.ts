@@ -128,7 +128,9 @@ export async function createApp(options: AppOptions) {
   app.post('/api/tasks/:id/project/refresh', async request => files.refresh(params(request.params).id));
   app.post('/api/agent/investigate', async (request, reply) => {
     const b = body(request.body);
-    return reply.code(202).send(jobs.start('investigate', str(b.taskId,'taskId'), str(b.roundId,'roundId'), undefined, b.model === undefined ? undefined : str(b.model,'model'), expected(b.provider)));
+    if (b.answer !== undefined && (typeof b.answer !== 'string' || b.answer.length > 20000)) throw invalid('Enter an answer up to 20,000 characters.');
+    if (b.proceed !== undefined && typeof b.proceed !== 'boolean') throw invalid('proceed must be true or false.');
+    return reply.code(202).send(jobs.start('investigate', str(b.taskId,'taskId'), str(b.roundId,'roundId'), undefined, b.model === undefined ? undefined : str(b.model,'model'), expected(b.provider), { answer: b.answer as string | undefined, proceed: b.proceed === true }));
   });
   app.post('/api/agent/chat', async (request, reply) => {
     const b = body(request.body);

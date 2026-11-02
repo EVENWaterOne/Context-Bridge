@@ -17,6 +17,7 @@ const round = z.object({
   id: short.min(1), number: z.number().int().positive(), observation, applied: z.boolean(),
   createdAt: short, completedAt: short.optional(), result: z.enum(['Better','Same','Worse','Not sure']).optional(), note: z.string().max(50000).optional(),
   suggestion: z.record(z.string(), z.unknown()).optional(), operationId: short.optional(),
+  clarifications: z.array(z.object({ questions: z.array(z.string().max(3000)).max(20), answer: z.string().max(20000).optional(), askedAt: short.optional(), answeredAt: short.optional() })).max(50).optional(),
 });
 const task = z.object({
   id: short.min(1), name: short.min(1), hardware: z.object({ name: short, controller: short, connection: short, joints: z.number(), gripper: z.boolean(), notes: z.string().max(50000), configured: z.boolean() }).passthrough(),
