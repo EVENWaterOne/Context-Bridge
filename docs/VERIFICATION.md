@@ -46,3 +46,18 @@ The pinned Node 24.14 runtime emits an experimental warning for its built-in SQL
 | Check → correction | Passed with fake provider | A failing file, or a proposal that changes nothing, is sent back once with the problem; a corrected proposal replaces the first (a remaining failure is shown); a correction that fails or hits the time limit keeps the first proposal |
 | Browser → API → UI | Passed with test provider | Fixture with `UI_FIXTURE_QUESTIONS=1`: answer flow, "Propose without answering", an unsent answer kept across Back, a context change on the question page, desktop and 390 px |
 | Real model inference | Not performed | No real Codex or Anthropic account was used |
+
+## Run code while diagnosing — 2026-11-02
+
+| Boundary | Result | Evidence |
+| --- | --- | --- |
+| Frontend/backend compile | Passed | `npm run build` |
+| Automated tests | Passed | `npm test` (Node 22.23 in the build container); the Claude Code sandbox test skips where bubblewrap/socat are missing |
+| Project copy | Passed | Folder name kept; `.env`, `node_modules`, links not copied; the selected text is what the agent saw; copies removed after the job |
+| Verification command | Passed | Runs before and after on exactly the proposed text; a change that breaks it goes back once in the same copy; a missing tool is "unavailable", not a code failure; time limit kills the process tree; model keys removed |
+| Settings | Passed | Only `PUT /api/tasks/:id/execution` changes run mode; workspace saves and imports cannot; bad commands are refused |
+| Real Codex 0.164.0 binary | Passed with a local mock model | `tests/backend.test.ts`: two real commands ran in the copy and their output reached the mock, `apply_patch` edited the copy and became the proposal, a write to the real project was refused (read-only file system), a connection to the mock's port from a command failed (EPERM), verification passed before and after, Apply wrote the reviewed text |
+| Real Claude Code 2.1.312 binary | Passed with a local mock model | `tests/claude-binary.test.ts` with bubblewrap and socat extracted to a scratch folder on PATH: commands ran in the copy, Edit changed the copy, writes to the real project (EROFS) and the network were blocked, saved keys in the data folder were unreadable, `ANTHROPIC_API_KEY` was absent from commands, Write and Read outside the copy were refused |
+| Browser → API → UI | Passed with test provider | Fixture on port 4175 (`UI_FIXTURE_PACE` slows it for screenshots): run-code card with the detected `npm test`, live command list while running, review page with before/after results and the command list, 1360 px and 390 px without horizontal scrolling |
+| Windows sandboxes | Not tested | Codex's `unelevated` Windows sandbox setup and Claude Code's Windows behaviour were not run on Windows |
+| Real model inference | Not performed | No real Codex or Anthropic account was used |

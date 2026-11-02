@@ -23,6 +23,7 @@ const task = z.object({
   id: short.min(1), name: short.min(1), hardware: z.object({ name: short, controller: short, connection: short, joints: z.number(), gripper: z.boolean(), notes: z.string().max(50000), configured: z.boolean() }).passthrough(),
   files: z.array(file).max(500), rounds: z.array(round).min(1).max(1000), activeRoundId: short, createdAt: short,
   rootId: short.optional(), rootPath: z.string().max(4096).optional(),
+  execution: z.object({ enabled: z.boolean(), command: z.string().max(2000).optional() }).optional(),
 });
 const workspace = z.object({ version: z.literal(1), tasks: z.array(task).min(1).max(100), activeTaskId: short, stage: z.enum(['setup','first-run','observe','request','investigating','review','applying','test','feedback']) });
 
@@ -54,6 +55,8 @@ export const diagnosisSchema = z.object({
   evidence: z.array(z.string().max(3000)).max(50), questions: z.array(z.string().max(3000)).max(20), risk: z.string().max(10000),
   changes: z.array(z.object({ path: z.string().min(1).max(500), afterContent: z.string().max(1024 * 1024) }).strict()).max(30),
 }).strict();
+/** Run mode: the agent edits files in its working copy, so the answer carries no file text. */
+export const runDiagnosisSchema = diagnosisSchema.omit({ changes: true });
 export const diagnosisOutputSchema: Record<string, unknown> = {
   type: 'object', additionalProperties: false,
   properties: {
@@ -62,4 +65,9 @@ export const diagnosisOutputSchema: Record<string, unknown> = {
     changes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { path: { type: 'string' }, afterContent: { type: 'string' } }, required: ['path','afterContent'] } },
   },
   required: ['outcome','title','summary','rationale','evidence','questions','risk','changes'],
+};
+const { changes: _changes, ...runProperties } = diagnosisOutputSchema.properties as Record<string, unknown>;
+export const runOutputSchema: Record<string, unknown> = {
+  type: 'object', additionalProperties: false, properties: runProperties,
+  required: (diagnosisOutputSchema.required as string[]).filter(key => key !== 'changes'),
 };

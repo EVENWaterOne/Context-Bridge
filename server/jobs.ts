@@ -1,16 +1,18 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { PROVIDER_LABELS, type JobView, type ChatMessage, type FileCheck, type Proposal, type ProviderId } from '../src/lib/backend-types.ts';
-import type { Round } from '../src/lib/workflow.ts';
+import { PROVIDER_LABELS, type JobView, type ChatMessage, type CommandRun, type FileCheck, type Proposal, type ProviderId, type Verification, type VerificationRun } from '../src/lib/backend-types.ts';
+import type { Round, Task } from '../src/lib/workflow.ts';
 import type { ProviderSwitch } from './providers.ts';
-import { Store } from './store.ts';
+import { Store, filePath } from './store.ts';
 import { FileService } from './files.ts';
-import { contextHash, writeSnapshot, diagnosisPrompt, chatPrompt, parseProposal, repairPrompt } from './context.ts';
+import { contextHash, writeSnapshot, diagnosisPrompt, chatPrompt, parseProposal, repairPrompt, type RepairProblem, type RunContext } from './context.ts';
 import { checkChanges } from './verify.ts';
-import { diagnosisOutputSchema } from './validation.ts';
+import { diagnosisOutputSchema, runOutputSchema } from './validation.ts';
 import { BridgeError, conflict, invalid } from './errors.ts';
+import { createWorkCopy, detectCommand, listProject, readEdits, removeCopy, writeChanges, type WorkCopy } from './workcopy.ts';
+import { runShell } from './runner.ts';
 
 export interface InvestigateOptions {
   /** The user's answer to the questions of the last diagnosis, saved with the round. */
@@ -20,6 +22,27 @@ export interface InvestigateOptions {
 }
 
 const MAX_ACTIVITY = 60, MAX_REASONING = 256 * 1024;
+/** Run mode: commands kept on the live job and on the proposal, and how much of each output. */
+const LIVE_COMMANDS = 20, LIVE_OUTPUT = 2_000, KEPT_COMMANDS = 60, KEPT_OUTPUT = 4_000;
+const VERIFY_LIMIT_MS = 5 * 60 * 1000;
+const tail = (text: string | undefined, size: number) => text && text.length > size ? `…${text.slice(-size)}` : text;
+const shortCommand = (text: string) => { const line = text.replace(/\s+/g, ' ').trim(); return line.length > 140 ? `${line.slice(0, 140)}…` : line; };
+const minutes = (ms: number) => { if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} seconds`; const value = Math.round(ms / 60_000); return value === 1 ? 'one minute' : value === 5 ? 'five minutes' : `${value} minutes`; };
+
+/** The verification command for a run: the user's own, else one detected in the project copy. */
+export function commandFor(task: Task, paths: string[], read: (rel: string) => string | undefined): { text: string; source: 'user' | 'detected' } | undefined {
+  const own = task.execution?.command?.trim();
+  if (own) return { text: own, source: 'user' };
+  const detected = detectCommand(task, paths, read);
+  return detected ? { text: detected, source: 'detected' } : undefined;
+}
+function readText(path: string): string | undefined { try { return readFileSync(path, 'utf8'); } catch { return undefined; } }
+function describe(run: VerificationRun): string {
+  if (run.status === 'passed') return 'passed';
+  if (run.status === 'unavailable') return 'could not run (program not found)';
+  if (run.status === 'timeout') return 'did not finish in time';
+  return `failed${run.exitCode !== undefined && run.exitCode !== null ? ` (exit code ${run.exitCode})` : ''}`;
+}
 /** Record what the agent is doing as the current message and in the run's history. */
 function note(job: JobView, text: string): void {
   job.message = text;
@@ -38,8 +61,17 @@ export class Jobs {
   controllers = new Map<string, AbortController>();
   pending = new Set<Promise<void>>();
   timeoutMs: number;
+  /** The longer limit for a diagnosis that runs code: copying, building and testing take time. */
+  runTimeoutMs: number;
+  /** Whether a task without a saved choice runs code while diagnosing. */
+  runCodeDefault: boolean;
   closing = false;
-  constructor(store: Store, files: FileService, provider: ProviderSwitch, dataDir: string, timeoutMs = 5 * 60 * 1000) { this.store = store; this.files = files; this.provider = provider; this.dataDir = dataDir; this.timeoutMs = timeoutMs; }
+  constructor(store: Store, files: FileService, provider: ProviderSwitch, dataDir: string, timeoutMs = 5 * 60 * 1000, run: { timeoutMs?: number; byDefault?: boolean } = {}) {
+    this.store = store; this.files = files; this.provider = provider; this.dataDir = dataDir; this.timeoutMs = timeoutMs;
+    this.runTimeoutMs = run.timeoutMs ?? 20 * 60 * 1000; this.runCodeDefault = run.byDefault ?? true;
+  }
+  /** Whether diagnoses of this task run code in a project copy. */
+  runsCode(task: Task): boolean { return task.execution?.enabled ?? this.runCodeDefault; }
   start(kind: 'investigate'|'chat', taskId: string, roundId?: string, message?: string, model?: string, expected: ProviderId = 'codex', options: InvestigateOptions = {}): JobView {
     if (this.closing) throw conflict('Local service is shutting down.');
     if (this.controllers.size) throw conflict(`${this.provider.label} is already working. Stop or finish the current request first.`);
@@ -69,14 +101,21 @@ export class Jobs {
     // Chat history reaches a diagnosis only when the round includes history, like earlier rounds.
     const prior = kind === 'chat' || activeRound.observation.includePrevious ? this.store.messages(taskId) : [];
     if (kind === 'chat') this.store.message(taskId, { id: `msg-${randomUUID()}`, role: 'you', text: message!.trim(), createdAt: job.createdAt, status: 'completed' });
+    const runMode = kind === 'investigate' && this.runsCode(task);
+    const limit = runMode ? this.runTimeoutMs : this.timeoutMs;
     const controller = new AbortController();
     this.controllers.set(job.id, controller);
     this.store.saveJob(job);
     const promise = (async () => {
       let timedOut = false;
       const started = Date.now();
-      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, this.timeoutMs);
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, limit);
       timeout.unref();
+      // Run mode: the agent's project copy, and a second copy where the service runs the verification
+      // command on the current files and then on exactly the proposed text.
+      let work: WorkCopy | undefined, verifyCopy: WorkCopy | undefined, tools = false;
+      const commands: CommandRun[] = [];
+      const verification: Verification = {};
       // A Stop ends the job. The job time limit ending an optional correction does not: the first
       // proposal is kept.
       const stopped = () => controller.signal.aborted && !timedOut;
@@ -91,14 +130,64 @@ export class Jobs {
         const status = await provider.status();
         if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
         if (!status.available || !status.authenticated) throw new Error(status.error || `Connect ${agent} in Settings before sending a request.`);
-        note(job, `${agent} is connected${model ? ` (${model})` : ''}. Sending the selected context…`); this.emit(job);
-        const prompt = kind === 'investigate' ? diagnosisPrompt(serialized, { conversation: prior, proceed: options.proceed }) : chatPrompt(serialized, message!, prior, activeRound.observation.includePrevious);
+        let command: { text: string; source: 'user' | 'detected' } | undefined, runContext: RunContext | undefined;
+        const verify = async (copy: WorkCopy, when: 'before' | 'after'): Promise<VerificationRun> => {
+          const { text, source } = command!;
+          note(job, when === 'before' ? `Running the verification command on your current files: ${shortCommand(text)}` : `Running the verification command on ${agent}'s change: ${shortCommand(text)}`); this.emit(job);
+          let outcome: VerificationRun;
+          try {
+            const result = await runShell(text, copy.dir, controller.signal, Math.max(1_000, Math.min(VERIFY_LIMIT_MS, limit - (Date.now() - started))));
+            outcome = {
+              command: text, source, exitCode: result.exitCode, durationMs: result.durationMs,
+              status: result.notFound ? 'unavailable' : result.timedOut ? 'timeout' : result.exitCode === 0 ? 'passed' : 'failed',
+              output: tail(result.notFound ? `${result.output}\nThe program was not found on this computer. Install it, or change the verification command.` : result.output, 32_000)!,
+            };
+          } catch (error) {
+            if (!timedOut) throw error;
+            outcome = { command: text, source, status: 'timeout', output: 'The time limit for this request ended the verification.', durationMs: 0 };
+          }
+          note(job, `Verification ${when === 'before' ? 'on your current files' : `of ${agent}'s change`}: ${describe(outcome)}`); this.emit(job);
+          return outcome;
+        };
+        if (runMode) {
+          // The agent runs commands only inside its provider's sandbox. Where that is not available,
+          // the agent gets no tools and the service still runs the build or test command.
+          const access = provider.commandAccess ? await provider.commandAccess(controller.signal).catch((error: Error) => {
+            if (controller.signal.aborted) throw error;
+            return { available: false, note: `${agent} could not prepare its sandbox: ${error.message}` };
+          }) : { available: false, note: `${agent} cannot run commands in this service.` };
+          if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+          tools = access.available;
+          if (!tools) { note(job, `${access.note} ${agent} will not run commands itself; the build or test command still runs.`); this.emit(job); }
+          note(job, 'Copying the project, so code can run without touching your files…'); this.emit(job);
+          if (tools) work = await createWorkCopy(task, join(snapshotDir, 'work'), controller.signal);
+          const copy = work;
+          const listed = copy ? undefined : await listProject(task);
+          const own = new Map(task.files.map(f => [filePath(f), f.content]));
+          command = commandFor(task, copy ? [...copy.manifest.keys()] : listed!.paths, rel => own.get(rel) ?? (copy ? readText(join(copy.dir, ...rel.split('/'))) : listed!.read(rel)));
+          if (command) {
+            verifyCopy = await createWorkCopy(task, join(snapshotDir, 'check'), controller.signal);
+            verification.before = await verify(verifyCopy, 'before');
+          }
+          runContext = { tools, editable: task.files.filter(f => f.includeInContext !== false).map(f => filePath(f)), command: command?.text, before: verification.before };
+        }
+        note(job, `${agent} is connected${model ? ` (${model})` : ''}. ${tools ? `Sending the request; ${agent} works in the project copy and can run commands there…` : 'Sending the selected context…'}`); this.emit(job);
+        const prompt = kind === 'investigate' ? diagnosisPrompt(serialized, { conversation: prior, proceed: options.proceed, run: runContext }) : chatPrompt(serialized, message!, prior, activeRound.observation.includePrevious);
         const run = async (text: string) => {
           const result = await provider.run({
-            prompt: text, snapshotDir, model, signal: controller.signal, outputSchema: kind === 'investigate' ? diagnosisOutputSchema : undefined,
+            prompt: text, snapshotDir, model, signal: controller.signal, workspace: work?.dir,
+            outputSchema: kind === 'investigate' ? (tools ? runOutputSchema : diagnosisOutputSchema) : undefined,
             onEvent: event => {
               if (controller.signal.aborted || job.status !== 'running') return;
-              if (event.type === 'delta') {
+              if (event.type === 'command') {
+                const entry: CommandRun = { ...event.command, command: event.command.command.slice(0, 4_000), output: tail(event.command.output, KEPT_OUTPUT) };
+                const index = commands.findIndex(item => item.id === entry.id);
+                if (index >= 0) commands[index] = entry;
+                else { commands.push(entry); if (commands.length > KEPT_COMMANDS) commands.shift(); }
+                job.commands = commands.slice(-LIVE_COMMANDS).map(item => ({ ...item, output: tail(item.output, LIVE_OUTPUT) }));
+                const exit = entry.exitCode !== undefined && entry.exitCode !== null ? ` (exit code ${entry.exitCode})` : '';
+                note(job, entry.status === 'running' ? `Running: ${shortCommand(entry.command)}` : entry.status === 'declined' ? `Not allowed: ${shortCommand(entry.command)}` : `${entry.status === 'completed' ? 'Finished' : 'Failed'}: ${shortCommand(entry.command)}${exit}`);
+              } else if (event.type === 'delta') {
                 if (job.text.length + event.text.length > 2 * 1024 * 1024) { controller.abort(); return; }
                 job.text += event.text;
               } else if (event.type === 'reasoning') {
@@ -115,7 +204,8 @@ export class Jobs {
         let result = await run(prompt);
         job.text = result.text; job.threadId = result.threadId;
         if (kind === 'investigate') {
-          const parse = (text: string) => parseProposal(text, task, activeRound, `suggestion-${randomUUID()}`, providerId);
+          // In run mode the file changes are read from the agent's project copy.
+          const parse = async (text: string) => parseProposal(text, task, activeRound, `suggestion-${randomUUID()}`, providerId, work ? await readEdits(task, work, controller.signal) : undefined);
           const check = async (value: Proposal): Promise<FileCheck[]> => {
             if (value.outcome !== 'proposal') return [];
             note(job, 'Checking the proposed files…'); this.emit(job);
@@ -125,21 +215,32 @@ export class Jobs {
               return value.changes.map(change => ({ path: change.path, check: 'Not checked', status: 'skipped', detail: 'The time limit ended the automatic check.' }));
             }
           };
+          // Exactly the proposed text, on a fresh copy of the current files: what Apply would produce.
+          const verifyProposal = async (value: Proposal): Promise<VerificationRun | undefined> => {
+            if (!verifyCopy || value.outcome !== 'proposal' || verification.before?.status === 'unavailable') return undefined;
+            await writeChanges(verifyCopy, task.files.filter(f => f.includeInContext !== false).map(f => ({ path: filePath(f), afterContent: f.content })));
+            await writeChanges(verifyCopy, value.changes);
+            return verify(verifyCopy, 'after');
+          };
           let proposal: Proposal | undefined, rejected: BridgeError | undefined;
-          try { proposal = parse(result.text); }
+          try { proposal = await parse(result.text); }
           catch (error) { if (!(error instanceof BridgeError)) throw error; rejected = error; }
           let checks = proposal ? await check(proposal) : [];
+          let after = proposal ? await verifyProposal(proposal) : undefined;
           const failures = checks.filter(item => item.status === 'failed');
+          // A verification that passed on the current files and fails with the change: the change broke it.
+          const broke = (value?: VerificationRun) => !!value && (value.status === 'failed' || value.status === 'timeout') && verification.before?.status === 'passed';
           // One correction round, while at least half of the time limit is left: the model sees the
           // exact problem instead of the user finding it on the hardware or getting a failed job.
-          if ((rejected || failures.length) && Date.now() - started < this.timeoutMs / 2) {
-            note(job, rejected ? `${agent}'s answer could not be used; asking for a corrected one…` : `The automatic check found ${failures.length === 1 ? 'an error' : `${failures.length} errors`}; ${agent} is correcting the proposal…`);
+          if ((rejected || failures.length || broke(after)) && Date.now() - started < limit / 2) {
+            const problem: RepairProblem = rejected ? { rejected: rejected.message } : failures.length ? { failures } : { verification: after! };
+            note(job, rejected ? `${agent}'s answer could not be used; asking for a corrected one…` : failures.length ? `The automatic check found ${failures.length === 1 ? 'an error' : `${failures.length} errors`}; ${agent} is correcting the proposal…` : `The verification command failed with the change; ${agent} is correcting it…`);
             job.text = ''; this.emit(job);
             try {
-              const retry = await run(repairPrompt(prompt, result.text, rejected ? { rejected: rejected.message } : { failures }));
-              const repaired = parse(retry.text);
+              const retry = await run(repairPrompt(prompt, result.text, problem, tools));
+              const repaired = await parse(retry.text);
               // A corrected proposal replaces the first one. A question in reply to a failed check does not.
-              if (!proposal || repaired.outcome === 'proposal') { proposal = repaired; checks = await check(repaired); result = retry; }
+              if (!proposal || repaired.outcome === 'proposal') { proposal = repaired; checks = await check(repaired); after = await verifyProposal(repaired); result = retry; }
             } catch (error) {
               // A Stop or a changed context ends the job. A failed correction (an unusable answer,
               // a provider error or the time limit) keeps the first proposal, or the first error.
@@ -150,7 +251,11 @@ export class Jobs {
           }
           if (!proposal) throw rejected!;
           ensureCurrent();
-          const final: Proposal = proposal.outcome === 'proposal' ? { ...proposal, checks } : proposal;
+          const ran = runMode ? {
+            commands: commands.map(item => ({ ...item, output: tail(item.output, KEPT_OUTPUT) })),
+            ...(command ? { verification: { ...verification, ...(after ? { after } : {}) } } : {}),
+          } : {};
+          const final: Proposal = proposal.outcome === 'proposal' ? { ...proposal, checks, ...ran } : { ...proposal, ...ran };
           job.result = final;
           const asked = final.outcome === 'needs_information' ? { questions: final.questions, askedAt: new Date().toISOString() } : undefined;
           this.store.mutate(s => ({ ...s, stage: s.activeTaskId === taskId ? 'review' : s.stage, tasks: s.tasks.map(t => t.id !== taskId ? t : { ...t, rounds: t.rounds.map(r => r.id === activeRound.id ? { ...r, suggestion: final, applied: false, ...(asked ? { clarifications: [...(r.clarifications ?? []), asked].slice(-MAX_CLARIFICATIONS) } : {}) } : r) }) }));
@@ -161,11 +266,13 @@ export class Jobs {
         job.status = 'completed'; note(job, kind === 'investigate' ? 'Ready for review' : 'Reply complete');
       } catch (e) {
         job.status = controller.signal.aborted ? (timedOut ? 'failed' : 'cancelled') : 'failed';
-        job.error = timedOut ? `${agent} request timed out after five minutes. Retry with less context.` : controller.signal.aborted ? 'Request stopped. No file changes were made.' : e instanceof Error ? e.message : `${agent} request failed.`;
+        job.error = timedOut ? `${agent} request timed out after ${minutes(limit)}. Retry with less context${runMode ? ' or a faster verification command' : ''}.` : controller.signal.aborted ? 'Request stopped. No file changes were made.' : e instanceof Error ? e.message : `${agent} request failed.`;
         note(job, job.error);
         if (kind === 'chat') this.store.message(taskId, { id: `msg-${job.id}`, role: 'bit', text: job.text || job.error, status: job.status === 'cancelled' ? 'cancelled' : 'failed', createdAt: new Date().toISOString() });
       } finally {
         clearTimeout(timeout);
+        // The copies can be large; the proposal keeps everything the review needs.
+        if (work || verifyCopy) await Promise.all([removeCopy(join(snapshotDir, 'work')), removeCopy(join(snapshotDir, 'check'))]);
         this.controllers.delete(job.id);
         this.emit(job);
       }
