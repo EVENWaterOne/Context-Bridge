@@ -139,3 +139,48 @@ The owner's arm now runs on an Arduino Uno (four SG90s on D9–D12, sketch `Ardu
 ### Known issue, not changed
 
 - Creating a task requests `/api/tasks/:id/messages` before the workspace save lands, so the page shows "Task not found." once (404). The task itself saves normally.
+
+## 2026-11-01 — Diagnosis kept asking for more information
+
+### Reported problem
+
+The user reported that work could not move forward: Codex never ran a verification step, and whatever the user said, the agent replied that information was missing and sent the round back.
+
+### Root causes found in the code
+
+- The diagnosis prompt told the model to "explain uncertainty and ask for missing evidence", "never change calibration limits without explicit measured evidence" and, if evidence was insufficient, to return `needs_information`, without saying what counts as insufficient. Every task carries `null` servo calibration and no test results, so a careful model always qualified.
+- The model cannot run anything (Codex has no shell tool and a read-only sandbox; Claude Code has no tools), and the prompt never said that the user's hardware test after Apply is the verification. Missing test results therefore read as missing information.
+- The user's answers were lost. Revising the observation cleared the questions; a round only reaches `previousRounds` after Apply and feedback; and the Ask BIT conversation was never sent with a diagnosis. The next diagnosis started from the same context and asked again.
+- The review page offered no way to answer: Apply was disabled and the only action was Revise observation.
+- Small model slips failed the whole diagnosis: a `files/` prefix on a path, an unchanged file among real changes, or questions together with a concrete change.
+
+### Changes
+
+- Diagnosis prompt: a reversible proposal is the default; `needs_information` is reserved for three named blockers; missing calibration alone is not a blocker; the user's test is named as the verification; at most three questions; never repeat an answered one. `proceed` asks for a best-effort proposal. Both provider system prompts say the files are already in the request and no tools are needed.
+- Answers: `POST /api/agent/investigate` accepts `answer` and `proceed`. The service records each question set and answer in `round.clarifications` (server-owned like suggestions, kept when the observation is revised, part of the context hash so the resulting proposal stays applicable). The Ask BIT conversation is sent with a diagnosis when the round includes history; it is not hashed, so chatting later does not invalidate a proposal.
+- Verification: `server/verify.ts` parses proposed JSON, JavaScript (`node --check`) and Python (`ast.parse`) files in an empty temporary folder with a minimal environment and a 10 s limit, and checks the bracket balance of C/C++ files in process. Nothing from the project is executed or compiled. A file that fails while its current version passes, or an answer the service cannot use, is sent back to the provider once while at least half of the time limit is left. A corrected proposal replaces the first one, even if it still fails (the failure is shown); a failed correction (unusable answer, provider error or time limit) keeps the first proposal. Results are stored as `proposal.checks`.
+- Parsing: path spellings are matched only against selected files (an ambiguous spelling is refused), unchanged files are dropped, the model's own outcome stands (a question round discards draft edits; a proposal needs at least one real change, and its questions are shown as things to watch during the test).
+- Workbench: the review page shows BIT's questions with an answer box, **Send answers to BIT** or **Propose without answering**, earlier answers of the round, and the automatic checks; Apply reads **Apply despite failed check** when one failed. An unsent answer survives leaving the page and goes with the next request. A review page whose result was invalidated by a context change offers **Send to BIT** instead of an empty page. The request page warns when no code file is selected and says that answers are included.
+- `tests/fixtures/ui-server.ts` starts with a question when run with `UI_FIXTURE_QUESTIONS=1`.
+
+Running the project's own commands (tests, `arduino-cli compile`, PlatformIO) was left out on purpose: it would let the local page run programs on the user's computer, and Codex 0.164.0's read-only sandbox cannot limit which files a shell may read. It needs its own decision.
+
+### Review findings resolved
+
+An independent review covered backend correctness, security, the workbench flow and whether the change solves the reported problem; a separate skeptic checked each finding. 23 were confirmed (no high severity) and 5 refuted. Fixed:
+
+- A correction cut off by the job time limit discarded the first, usable proposal and blamed the context size. The time limit now ends only the correction, and a correction starts only while half the limit is left.
+- Answers did not reach later rounds; completed rounds now carry their answered questions in `previousRounds`.
+- A typed answer was lost when the user went Back, or when a context change emptied the review page. The draft is kept until it is sent, any Send to BIT carries it, and an invalidated review page offers Send to BIT.
+- A question round that came with a draft edit was turned into an applicable proposal. The model's own outcome now stands and the draft is discarded. A proposal that changes nothing is sent back for correction instead of being shown as a question round.
+- The answer was saved before the request was accepted, retries could save it twice, unanswered question sets grew without a bound (past 50 every workspace save failed), and imported tasks could carry planted answers. Answers are now saved only after the snapshot is written, a repeated answer is recorded once, the list keeps the newest 20, and imports drop recorded answers.
+- No context check followed the new check phase; one now runs right before the result is stored. A temporary-folder failure in a check no longer fails the diagnosis.
+- `./files/x` could resolve to a different selected file `x`; ambiguous spellings are refused.
+- C/C++ firmware had no check at all; a bracket-balance check now covers it. The no-code warning recognises `.mjs`, `.cjs` and `.hpp` and is hidden in the demo. Long paths wrap at 390 px. A double click no longer leaves a stale error.
+
+### Verification evidence
+
+- `npm test`: 152 passed, 0 failed, 0 skipped (133 existing, 7 new check tests, 12 new backend tests; the outside-context test now also covers `files/` and `./` spellings). Mutation runs confirm that removing the conversation hand-off, the server-owned answers, the next-round answers or the time-limit handling fails the new tests.
+- `npm run build` passed. This container has Node 22.23 rather than the pinned Node 24; the suite and build ran on 22.23.
+- Browser check on the UI fixture with `UI_FIXTURE_QUESTIONS=1` (port 4175, no model): question → answer in Chinese → proposal with "Python syntax passed"; question → **Propose without answering** → proposal; answer typed → Back → Send to BIT (double-clicked) → the answer is recorded once and no error is shown; unchecking a file on the question page → "Ask BIT again" with Send to BIT and the draft kept. Checked at 1360 px and 390 px without horizontal scrolling.
+- No real Codex or Claude inference was run; how often a real model now asks questions will show in the user's next sessions.

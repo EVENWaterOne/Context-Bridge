@@ -64,9 +64,11 @@ export class Store {
       const contextChanged = JSON.stringify(files) !== JSON.stringify(previous.files) || JSON.stringify(t.hardware) !== JSON.stringify(previous.hardware);
       const rounds = t.rounds.map(r => {
         const old = previous.rounds.find(p => p.id === r.id);
-        if (!old) return { ...r, applied: false, suggestion: undefined, operationId: undefined };
+        if (!old) return { ...r, applied: false, suggestion: undefined, operationId: undefined, clarifications: undefined };
         const changed = contextChanged || JSON.stringify(r.observation) !== JSON.stringify(old.observation);
-        return { ...r, applied: old.applied, operationId: old.operationId, suggestion: old.applied || !changed ? old.suggestion : undefined };
+        // Questions and answers are recorded by the service with each diagnosis. They outlive a revised
+        // observation, so a later diagnosis in this round still knows what the user already answered.
+        return { ...r, applied: old.applied, operationId: old.operationId, suggestion: old.applied || !changed ? old.suggestion : undefined, clarifications: old.clarifications };
       });
       return { ...t, rootId: previous.rootId, rootPath: previous.rootPath, files, rounds };
     });
@@ -74,8 +76,9 @@ export class Store {
     for (const op of this.operations()) if (['prepared','applying','undoing','recovery_required'].includes(op.state) && !tasks.some(t => t.id === op.taskId)) throw conflict('Resolve the pending file operation before removing its task.');
     return this.mutate(() => ({ ...incoming, tasks }));
   }
+  /** Imported or browser-created tasks carry no server-owned records: bindings, reviewed proposals or recorded answers. */
   stripBinding(t: Task): Task {
-    return { ...t, rootId: undefined, rootPath: undefined, files: t.files.map(f => ({ ...f, linked: false, hash: hash(f.content) })), rounds: t.rounds.map(r => ({ ...r, operationId: undefined, suggestion: r.suggestion?.version === 2 ? undefined : r.suggestion, applied: !!r.completedAt && r.applied })) };
+    return { ...t, rootId: undefined, rootPath: undefined, files: t.files.map(f => ({ ...f, linked: false, hash: hash(f.content) })), rounds: t.rounds.map(r => ({ ...r, operationId: undefined, suggestion: r.suggestion?.version === 2 ? undefined : r.suggestion, applied: !!r.completedAt && r.applied, clarifications: undefined })) };
   }
   import(value: { task?: Task; workspace?: Workspace; sourceId: string }): WorkspaceEnvelope {
     if (!value.sourceId || value.sourceId.length > 300) throw invalid('An import source ID is required.');
