@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from 'react';
 import { loadWorkspace, saveWorkspace, type Workspace } from './workflow.ts';
-import { ApiError, localApi, WorkspaceSaveQueue } from './local-api.ts';
+import { ApiError, localApi, taskMessages, WorkspaceSaveQueue } from './local-api.ts';
 import type { ServiceStatus, WorkspaceEnvelope, JobView } from './backend-types.ts';
 
 const explicitDemo = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE === 'demo';
@@ -105,5 +105,6 @@ export function useLocalWorkspace() {
     }
     adopt(envelope); return envelope;
   }, [adopt, keepDraft]);
-  return { workspace, setWorkspace, mode, status, setStatus, refreshStatus, saving, error, setError, initialJobs, flush, runMutation, reload, recovery };
+  const loadMessages = useCallback((taskId: string) => taskMessages(taskId, queue.current), []);
+  return { workspace, setWorkspace, mode, status, setStatus, refreshStatus, saving, error, setError, initialJobs, flush, runMutation, reload, recovery, loadMessages };
 }

@@ -6,7 +6,8 @@ export interface CodexRunRequest {
   model?: string;
   outputSchema?: Record<string, unknown>;
   signal: AbortSignal;
-  onEvent: (event: { type: 'delta' | 'status'; text: string }) => void;
+  /** delta: answer text; status: what the agent is doing now; reasoning: the model's own reasoning summary, when it sends one. */
+  onEvent: (event: { type: 'delta' | 'status' | 'reasoning'; text: string }) => void;
 }
 export interface CodexRunResult { text: string; threadId?: string }
 export interface CodexLogin { loginId?: string; authUrl?: string; verificationUri?: string; userCode?: string }

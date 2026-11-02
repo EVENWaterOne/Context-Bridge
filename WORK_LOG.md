@@ -140,6 +140,52 @@ The owner's arm now runs on an Arduino Uno (four SG90s on D9–D12, sketch `Ardu
 
 - Creating a task requests `/api/tasks/:id/messages` before the workspace save lands, so the page shows "Task not found." once (404). The task itself saves normally.
 
+## 2026-10-30 — New task no longer reports "Task not found."
+
+The known issue above: creating a task loaded its chat messages before the debounced workspace save had sent the task to the server, so `GET /api/tasks/:id/messages` returned 404 and the page showed "Task not found." once.
+
+### Fixed
+
+- The save queue now records which tasks the server has confirmed (loaded, adopted or saved). `taskMessages()` returns an empty list for a task created in this browser that the server has not saved yet, without a request; such a task cannot have messages, because Ask BIT saves the workspace before sending. Tasks the server has confirmed are still fetched, so a task that really is missing still shows the server's 404.
+- The server is unchanged: it cannot tell a not-yet-saved task from one that does not exist.
+
+### Verification evidence
+
+- New test in `tests/local-api.test.ts`: no request and an empty list before the save, a real fetch after it, and a 404 still reported for a saved task the server no longer has. With the queue check removed it fails with `ApiError: Task not found.`
+- `npm test`: 136 passed. One full run had an intermittent failure in the Codex login-flow test (`tests/codex.test.ts`), which passed alone and in the next full run. `npm run build` passed.
+- Browser on a separate service (port 4179, throwaway data folder): creating "Race check task" sent only `PUT /api/workspace` (200), with no messages request and no banner. Switching away and back then loaded its messages (200).
+
+## 2026-10-30 — Connection status and agent progress are visible
+
+The owner could not tell from the page whether Codex was connected, or see what the agent was doing. Three causes:
+
+- The only connection indicator was small grey text in the top strip ("Codex connected · Default model ↗"), checked once at page load and never again.
+- The Codex adapter forwarded answer text only. A diagnosis showed "Preparing the selected context" for its whole run, and the streamed text was not shown on the waiting page at all.
+- The service on port 4173 was started at 18:09 and `dist` was rebuilt at 18:18. `@fastify/static` runs with `wildcard: false`, so it only serves files that existed at start-up: after a reload the new bundle path fell through to `index.html` and the page stayed blank. Restarting the service fixes it; the setting itself was not changed.
+
+### Implemented
+
+- Header chip next to Ask BIT, and the top strip, show one of: connected (green, with the account and model), working with elapsed time (purple, pulsing), not signed in (amber), unavailable (red), local service offline (red), checking. On phones the chip shows the dot only. Status is checked again on window focus and every 60 seconds while the page is visible (at most once per 10 seconds); a request that gets no JSON back marks the service offline, with a readable message instead of "Failed to fetch". The provider dialog shows when status was last checked.
+- `server/codex.ts` forwards progress from the pinned 0.164.0 protocol (checked against `codex app-server generate-json-schema`): `turn/started`, `item/started` for reasoning, agent message, plan and compaction, reasoning summary deltas, `warning`, `error` (with `willRetry`) and `model/rerouted`. Progress never changes the run's result and stops at the terminal event or cancel. The turn request is unchanged.
+- `server/jobs.ts` keeps a step history on each job (`activity`, at most 60 entries, consecutive duplicates collapsed) and the reasoning summary (`reasoning`, at most 256 KB), and reports its own steps: checking the connection, connected and sending, the final state or the failure reason.
+- The diagnosis waiting page shows the steps with times, the reasoning summary and the streamed output (last 4000 characters); the robot illustration is smaller there so the steps fit on the first screen. Ask BIT shows the last three steps and the reasoning summary while a reply runs. A finished diagnosis shows a toast; a reply that arrives while Ask BIT is closed shows a toast and a dot on the button.
+- `tests/fixtures/ui-server.ts` now paces its fake run like a real one (steps, reasoning, streamed chunks) so these views can be checked by eye.
+
+### Verification evidence
+
+- New tests: the Codex adapter reports each step, the reasoning summary (including a second summary part) and warnings without changing the answer, and ignores another thread's reasoning; a job keeps steps and reasoning in order and never saves the reasoning as the reply; a failed job ends its history with the reason.
+- `npm test`: 140 passed. `npm run build` and `git diff --check` passed.
+- Browser on the UI fixture (port 4175, fake provider, no inference): chip and strip during idle, chat, closed-panel reply (toast and dot) and diagnosis; sampled every 300 ms, the elapsed time, steps, reasoning summary and live output character count advanced and the chip returned to connected at the end; phone width (375 px) without horizontal overflow; after stopping the service, Refresh status showed "Local service offline".
+- Not run: a real Codex request. Whether the signed-in models send reasoning summaries is unconfirmed; the step history works without them.
+
+## 2026-10-30 — First run no longer locks after a free preview
+
+On the First run step, **Preview motion** or a motion row set the same `playing` flag that the timed **Play illustrative preview →** uses, but without a timer. The primary button then showed a disabled "Playing…" until the owner pressed Pause preview, so the page looked stuck. The physical arm never moves from this page by design; only the on-screen model animates.
+
+- The timed run has its own state (`autoRun`). A free preview no longer disables or relabels the primary button. Pausing during a timed run cancels the move to the next step. The Test step uses the same rule.
+- The timed-run toast now says the animation is on screen and the physical arm is not running.
+- Verified on the UI fixture: free preview and row click leave the primary enabled; pause during a timed run stays on First run after 8 s; a timed run reaches Observe after 7.2 s. In the owner's Edge on port 4173 (after restarting the service): Preview motion leaves the primary enabled; the step was not advanced there. Edge reports WebGL available and no reduced-motion setting; the on-screen arm changed pose between captures. `npm test` passed.
+
 ## 2026-11-01 — Diagnosis kept asking for more information
 
 ### Reported problem
@@ -184,3 +230,9 @@ An independent review covered backend correctness, security, the workbench flow 
 - `npm run build` passed. This container has Node 22.23 rather than the pinned Node 24; the suite and build ran on 22.23.
 - Browser check on the UI fixture with `UI_FIXTURE_QUESTIONS=1` (port 4175, no model): question → answer in Chinese → proposal with "Python syntax passed"; question → **Propose without answering** → proposal; answer typed → Back → Send to BIT (double-clicked) → the answer is recorded once and no error is shown; unchecking a file on the question page → "Ask BIT again" with Send to BIT and the draft kept. Checked at 1360 px and 390 px without horizontal scrolling.
 - No real Codex or Claude inference was run; how often a real model now asks questions will show in the user's next sessions.
+
+## 2026-11-02 — 10-30 work restored on top of the diagnosis flow
+
+- The three 2026-10-30 sections above, and the arm limits recorded on the Uno sketch (`MEASURED_UNO_ARM`, described in the README), had not been committed; they were stashed while PR #3 was tried and merged, then applied to `feat/arduino-uno-controller` after that branch had taken main (`7936cb6`).
+- Conflicts resolved by keeping both sides: `server/jobs.ts` keeps the answer/proceed options, the check-and-correct pass and the step history with reasoning; the check and correction messages now go through `note()`, so they appear in the step history. `src/App.tsx` keeps the answer box and its buttons together with the activity panel and the separate `autoRun` state. `tests/fixtures/ui-server.ts` paces the run, then asks its question when `UI_FIXTURE_QUESTIONS=1`. `workflow.ts` imports, `styles.css` and this log kept both sides.
+- Verification: `npm test` 159 passed, 0 failed, 0 skipped; `npm run build` passed. UI fixture with `UI_FIXTURE_QUESTIONS=1` (port 4175, no model): the waiting page shows the step history and the working chip, the question is answered, the proposal arrives with "Python syntax passed", and the job history ends with "Checking the proposed files…" and "Ready for review". No console or server errors. No real inference or hardware was used; the First run fix was not rechecked in the browser.

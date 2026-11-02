@@ -1,5 +1,5 @@
 import type { Workspace } from './workflow.ts';
-import type { WorkspaceEnvelope, JobView } from './backend-types.ts';
+import type { ChatMessage, WorkspaceEnvelope, JobView } from './backend-types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -69,20 +69,31 @@ export async function followJob(id: string, onJob: (job: JobView) => void, signa
   throw new DOMException('Cancelled', 'AbortError');
 }
 
+/** Chat history for a task. A task created in this browser has none until its first save lands, so do not ask the server (and read a 404) before then. */
+export function taskMessages(taskId: string, queue?: WorkspaceSaveQueue | null): Promise<ChatMessage[]> {
+  if (queue && !queue.hasTask(taskId)) return Promise.resolve([]);
+  return localApi<ChatMessage[]>(`/api/tasks/${encodeURIComponent(taskId)}/messages`);
+}
+
+const taskIds = (workspace: Workspace) => new Set(workspace.tasks.map(task => task.id));
+
 /** One revision writer per browser; coalesce drafts and never send concurrent PUTs. */
 export class WorkspaceSaveQueue {
   private revision: number;
   private saved: string;
+  private savedTasks: Set<string>;
   private pending?: Workspace;
   private running?: Promise<void>;
   private put: (workspace: Workspace, revision: number) => Promise<WorkspaceEnvelope>;
   private onSaved?: (envelope: WorkspaceEnvelope, submitted: Workspace) => void;
   constructor(envelope: WorkspaceEnvelope, put: (workspace: Workspace, revision: number) => Promise<WorkspaceEnvelope>, onSaved?: (envelope: WorkspaceEnvelope, submitted: Workspace) => void) {
     this.onSaved = onSaved;
-    this.put = put; this.revision = envelope.revision; this.saved = JSON.stringify(envelope.workspace);
+    this.put = put; this.revision = envelope.revision; this.saved = JSON.stringify(envelope.workspace); this.savedTasks = taskIds(envelope.workspace);
   }
-  adopt(envelope: WorkspaceEnvelope) { this.revision = envelope.revision; this.saved = JSON.stringify(envelope.workspace); this.pending = undefined; }
+  adopt(envelope: WorkspaceEnvelope) { this.revision = envelope.revision; this.saved = JSON.stringify(envelope.workspace); this.savedTasks = taskIds(envelope.workspace); this.pending = undefined; }
   isDirty(workspace: Workspace) { return JSON.stringify(workspace) !== this.saved; }
+  /** Whether the server has confirmed this task, either loaded from it or saved to it. */
+  hasTask(taskId: string) { return this.savedTasks.has(taskId); }
   async idle() { try { await this.running; } catch { /* Caller will fetch the authoritative snapshot. */ } }
   async save(workspace: Workspace): Promise<void> {
     this.pending = workspace;
@@ -98,7 +109,7 @@ export class WorkspaceSaveQueue {
       const snapshot = this.pending; this.pending = undefined;
       if (JSON.stringify(snapshot) === this.saved) continue;
       const envelope = await this.put(snapshot, this.revision);
-      this.revision = envelope.revision; this.saved = JSON.stringify(envelope.workspace);
+      this.revision = envelope.revision; this.saved = JSON.stringify(envelope.workspace); this.savedTasks = taskIds(envelope.workspace);
       this.onSaved?.(envelope, snapshot);
     }
   }

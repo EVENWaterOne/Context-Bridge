@@ -19,6 +19,16 @@ export interface InvestigateOptions {
   proceed?: boolean;
 }
 
+const MAX_ACTIVITY = 60, MAX_REASONING = 256 * 1024;
+/** Record what the agent is doing as the current message and in the run's history. */
+function note(job: JobView, text: string): void {
+  job.message = text;
+  const activity = job.activity ??= [];
+  if (activity.at(-1)?.text === text) return;
+  activity.push({ at: new Date().toISOString(), text });
+  if (activity.length > MAX_ACTIVITY) activity.splice(1, activity.length - MAX_ACTIVITY);
+}
+
 export class Jobs {
   store: Store;
   files: FileService;
@@ -51,6 +61,7 @@ export class Jobs {
     // The provider is fixed for the whole job; the app refuses to switch while a job runs.
     const providerId = this.provider.active, agent = PROVIDER_LABELS[providerId];
     const job: JobView = { id: `run-${randomUUID()}`, kind, taskId, roundId: activeRound.id, status: 'running', message: 'Preparing the selected context', text: '', createdAt: new Date().toISOString(), provider: providerId };
+    job.activity = [{ at: job.createdAt, text: job.message }];
     const snapshotDir = join(this.dataDir, 'runs', job.id);
     const serialized = writeSnapshot(snapshotDir, task, activeRound);
     const fingerprint = contextHash(task, activeRound);
@@ -75,10 +86,12 @@ export class Jobs {
         if (!current || latest.activeRoundId !== activeRound.id || contextHash(latest, current) !== fingerprint) throw conflict(`Context changed while ${agent} was working. This result was not applied; request a new diagnosis.`);
       };
       try {
+        note(job, `Checking the ${agent} connection`); this.emit(job);
         const provider = await this.provider.provider(providerId);
         const status = await provider.status();
         if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
         if (!status.available || !status.authenticated) throw new Error(status.error || `Connect ${agent} in Settings before sending a request.`);
+        note(job, `${agent} is connected${model ? ` (${model})` : ''}. Sending the selected context…`); this.emit(job);
         const prompt = kind === 'investigate' ? diagnosisPrompt(serialized, { conversation: prior, proceed: options.proceed }) : chatPrompt(serialized, message!, prior, activeRound.observation.includePrevious);
         const run = async (text: string) => {
           const result = await provider.run({
@@ -88,7 +101,10 @@ export class Jobs {
               if (event.type === 'delta') {
                 if (job.text.length + event.text.length > 2 * 1024 * 1024) { controller.abort(); return; }
                 job.text += event.text;
-              } else job.message = event.text;
+              } else if (event.type === 'reasoning') {
+                if ((job.reasoning ?? '').length + event.text.length > MAX_REASONING) return;
+                job.reasoning = (job.reasoning ?? '') + event.text;
+              } else note(job, event.text);
               this.emit(job);
             },
           });
@@ -102,7 +118,7 @@ export class Jobs {
           const parse = (text: string) => parseProposal(text, task, activeRound, `suggestion-${randomUUID()}`, providerId);
           const check = async (value: Proposal): Promise<FileCheck[]> => {
             if (value.outcome !== 'proposal') return [];
-            job.message = 'Checking the proposed files…'; this.emit(job);
+            note(job, 'Checking the proposed files…'); this.emit(job);
             try { return await checkChanges(value.changes, controller.signal); }
             catch (error) {
               if (!timedOut) throw error;
@@ -117,7 +133,7 @@ export class Jobs {
           // One correction round, while at least half of the time limit is left: the model sees the
           // exact problem instead of the user finding it on the hardware or getting a failed job.
           if ((rejected || failures.length) && Date.now() - started < this.timeoutMs / 2) {
-            job.message = rejected ? `${agent}'s answer could not be used; asking for a corrected one…` : `The automatic check found ${failures.length === 1 ? 'an error' : `${failures.length} errors`}; ${agent} is correcting the proposal…`;
+            note(job, rejected ? `${agent}'s answer could not be used; asking for a corrected one…` : `The automatic check found ${failures.length === 1 ? 'an error' : `${failures.length} errors`}; ${agent} is correcting the proposal…`);
             job.text = ''; this.emit(job);
             try {
               const retry = await run(repairPrompt(prompt, result.text, rejected ? { rejected: rejected.message } : { failures }));
@@ -142,11 +158,11 @@ export class Jobs {
           const reply: ChatMessage = { id: `msg-${randomUUID()}`, role: 'bit', text: result.text, createdAt: new Date().toISOString(), status: 'completed' };
           this.store.message(taskId, reply); job.result = reply;
         }
-        job.status = 'completed'; job.message = kind === 'investigate' ? 'Ready for review' : 'Reply complete';
+        job.status = 'completed'; note(job, kind === 'investigate' ? 'Ready for review' : 'Reply complete');
       } catch (e) {
         job.status = controller.signal.aborted ? (timedOut ? 'failed' : 'cancelled') : 'failed';
         job.error = timedOut ? `${agent} request timed out after five minutes. Retry with less context.` : controller.signal.aborted ? 'Request stopped. No file changes were made.' : e instanceof Error ? e.message : `${agent} request failed.`;
-        job.message = job.error;
+        note(job, job.error);
         if (kind === 'chat') this.store.message(taskId, { id: `msg-${job.id}`, role: 'bit', text: job.text || job.error, status: job.status === 'cancelled' ? 'cancelled' : 'failed', createdAt: new Date().toISOString() });
       } finally {
         clearTimeout(timeout);
@@ -165,7 +181,7 @@ export class Jobs {
     if (controller) {
       controller.abort();
       // The provider must interrupt its actual turn; terminal persistence happens after it acknowledges abort.
-      job.message = `Stopping ${PROVIDER_LABELS[job.provider ?? this.provider.active]}…`;
+      note(job, `Stopping ${PROVIDER_LABELS[job.provider ?? this.provider.active]}…`);
       this.emit(job);
     }
     return job;

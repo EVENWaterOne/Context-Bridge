@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Vector3 } from 'three';
 import { ARM_DIMENSIONS as d, hardwareMotion, linkagePose } from '../src/components/hardwareKinematics.ts';
 import { createRobotModel } from '../src/components/RobotScene.ts';
-import { pendingCalibration, pinPlaceholder, servoCommand, hardwareDescription } from '../src/lib/hardware.ts';
+import { MEASURED_UNO_ARM, pendingCalibration, pinPlaceholder, servoCommand, hardwareDescription } from '../src/lib/hardware.ts';
 import { createExampleWorkspace, loadWorkspace, getActiveTask, makeFile, updateHardware } from '../src/lib/workflow.ts';
 const distance=(a:{x:number;y:number},b:{x:number;y:number})=>Math.hypot(a.x-b.x,a.y-b.y);
 const near=(a:number,b:number)=>assert.ok(Math.abs(a-b)<1e-9,`${a} != ${b}`);
@@ -59,12 +59,18 @@ test('controller changes update generated context while retaining user hardware 
  assert.equal(JSON.parse(task.files.find(f=>f.name==='hardware.json')!.content).controller,task.hardware.controller);
  assert.deepEqual(task.files.find(f=>f.id===userFile.id),userFile);
 });
-test('choosing Arduino Uno puts its board facts in the generated context without inventing calibration',()=>{
+test('choosing Arduino Uno puts its board facts and the recorded arm in the generated context, leaving entered calibration pending',()=>{
  const task=getActiveTask(updateHardware(createExampleWorkspace(),{controller:'Arduino Uno'}));
  const context=JSON.parse(task.files.find(f=>f.name==='hardware.json')!.content);
  assert.equal(context.controller,'Arduino Uno');assert.equal(context.controllerProfile.mcu,'ATmega328P');assert.equal(context.controllerProfile.fqbn,'arduino:avr:uno');
  assert.match(context.controllerProfile.pins.serial,/D0.*D1/);assert.deepEqual(context.servoCalibration,pendingCalibration());
- assert.equal(hardwareDescription('ESP32').controllerProfile,undefined);
- assert.equal(JSON.parse(getActiveTask(updateHardware(createExampleWorkspace(),{controller:'ESP32'})).files.find(f=>f.name==='hardware.json')!.content).controllerProfile,undefined);
+ const arm=context.measuredArm;assert.equal(arm.firmware,'ARDUINO_UNO_ARM_V4');assert.equal(arm.recorded,'2026-10-30');assert.deepEqual(arm.pins,{J1:'D9',J2:'D10',J3:'D11',J4:'D12'});
+ assert.deepEqual(arm.calibration,{J1:{min:10,max:170,zero:90,direction:1},J2:{min:120,max:180,zero:145,direction:1},J3:{min:30,max:150,zero:100,direction:1},J4:{min:98,max:170,zero:98,direction:1}});
+ assert.deepEqual(arm.originalFirmwareHome,{J1:90,J2:140,J3:90,J4:0});assert.equal(arm.increasingAngle.J1,'Not recorded');
+ assert.match(arm.method,/by eye/);assert.match(arm.limitSource.J1,/original ESP32 firmware/);assert.match(context.calibrationNote,/measuredArm/);
+ near(servoCommand('J2',0,MEASURED_UNO_ARM.calibration),145);near(servoCommand('J4',-20,MEASURED_UNO_ARM.calibration),98);near(servoCommand('J4',90,MEASURED_UNO_ARM.calibration),170);
+ assert.equal(hardwareDescription('ESP32').controllerProfile,undefined);assert.equal(hardwareDescription('ESP32').measuredArm,undefined);assert.match(hardwareDescription('ESP32').calibrationNote,/not supplied/);
+ const esp32=JSON.parse(getActiveTask(updateHardware(createExampleWorkspace(),{controller:'ESP32'})).files.find(f=>f.name==='hardware.json')!.content);
+ assert.equal(esp32.controllerProfile,undefined);assert.equal(esp32.measuredArm,undefined);
  assert.equal(pinPlaceholder('Arduino Uno'),'e.g. D9');assert.equal(pinPlaceholder('ESP32'),'e.g. GPIO 18');assert.equal(pinPlaceholder(''),'e.g. D9 or GPIO 18');
 });

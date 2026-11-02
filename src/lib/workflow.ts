@@ -1,5 +1,5 @@
 import { emptyAssembly, existingArmAssembly, assembledCount, assemblyReady, type HardwareAssembly } from './assembly.ts';
-import { HARDWARE_PROFILE, JOINT_IDS, JOINTS, hardwareDescription, pendingCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
+import { HARDWARE_PROFILE, JOINT_IDS, JOINTS, hardwareDescription, pendingCalibration, usesRecordedUnoCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
 import type { FileChange, FileCheck, ProviderId } from './backend-types.ts';
 /** Browser-local prototype state. No passwords or external service credentials are persisted. */
 export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigating' | 'review' | 'applying' | 'test' | 'feedback';
@@ -73,10 +73,12 @@ export function updateTask(state: Workspace, patch: Partial<Omit<Task, 'id'>>, t
 }
 /** Context files follow confirmed parts; unvalidated input stays in the setup draft. */
 function hardwareContext(hardware:Hardware) {
-  const assembly=hardware.assembly??existingArmAssembly(),count=assembledCount(assembly);
-  return {...hardwareDescription(hardware.controller),connection:hardware.connection,
+  const assembly=hardware.assembly??existingArmAssembly(),count=assembledCount(assembly),description=hardwareDescription(hardware.controller);
+  const recorded=usesRecordedUnoCalibration(hardware.servoCalibration??pendingCalibration());
+  const recordNote=description.measuredArm?(recorded?' servoCalibration was filled from measuredArm, the owner\'s by-eye record on the Uno sketch; see its method and limitSource.':' measuredArm is a separate record of the owner\'s arm on the Uno sketch, judged by eye; see its method and limitSource.'):recorded?' servoCalibration matches the Arduino Uno sketch record; those angles do not carry over to this controller.':'';
+  return {...description,connection:hardware.connection,
     category:assembly.category,servoCount:count,armDOF:Math.min(3,count),gripperDOF:count===4?1:0,
-    servo:undefined,calibrationNote:'Entered servo limits are user-provided. Unmeasured channels remain null; preview poses are illustrative.',axes:Object.fromEntries(JOINT_IDS.slice(0,count).map(joint=>[joint,{...JOINTS[joint],...assembly.parts[joint]}])),
+    servo:undefined,calibrationNote:`Entered servo limits are user-provided. Unmeasured channels remain null; preview poses are illustrative.${recordNote}`,axes:Object.fromEntries(JOINT_IDS.slice(0,count).map(joint=>[joint,{...JOINTS[joint],...assembly.parts[joint]}])),
     servoCalibration:hardware.servoCalibration??pendingCalibration(),configurationComplete:hardware.configured};
 }
 export function updateHardware(state: Workspace, patch: Partial<Hardware>): Workspace {
