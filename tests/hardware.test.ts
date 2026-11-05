@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Vector3 } from 'three';
-import { ARM_DIMENSIONS as d, hardwareMotion, linkagePose } from '../src/components/hardwareKinematics.ts';
+import { ARM_DIMENSIONS as d, hardwareMotion, linkagePose, armMotionDuration } from '../src/components/hardwareKinematics.ts';
 import { createRobotModel } from '../src/components/RobotScene.ts';
 import { pendingCalibration, servoCommand, hardwareDescription } from '../src/lib/hardware.ts';
 import { createExampleWorkspace, loadWorkspace, getActiveTask, makeFile, updateHardware } from '../src/lib/workflow.ts';
@@ -27,11 +27,11 @@ test('the hardware rig contains exactly four motors and a mechanically leveled t
   const m=createRobotModel('arm');try{
     const motors:string[]=[];m.scene.traverse(o=>{if(o.name.startsWith('hardware-servo-'))motors.push(o.name);});
     assert.deepEqual(motors.sort(),['hardware-servo-J1','hardware-servo-J2','hardware-servo-J3','hardware-servo-J4']);
-    for(let t=0;t<=7.2;t+=.12){m.update(t,'J4');assert.equal(m.jointAnchors.length,4);
+    for(let t=0;t<=armMotionDuration();t+=.12){m.update(t,'J4');assert.equal(m.jointAnchors.length,4);
       const tool=m.scene.getObjectByName('hardware-passive-tool-mount')!;
       const y=new Vector3(0,1,0).transformDirection(tool.matrixWorld);near(y.y,1);
     }
-    assert.deepEqual(hardwareMotion(0),hardwareMotion(7.2));
+    assert.deepEqual(hardwareMotion(0),hardwareMotion(armMotionDuration()));
   }finally{m.dispose();}
 });
 test('unprovided servo limits are never guessed; calibrated commands respect range, zero and reversal',()=>{

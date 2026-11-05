@@ -116,4 +116,4 @@ if animate:
   bpy.ops.render.render(animation=True)
 
 else:
- frame={'hero':1,'arm':40,'inspect':55,'build':110}[mode];scene.frame_set(frame);scene.render.filepath=str(folder/'preview.png');bpy.ops.render.render(write_still=True)
+ frame=40 if mode.startswith('arm') else {'hero':1,'inspect':55,'build':110}[mode];scene.frame_set(frame);scene.render.filepath=str(folder/'preview.png');bpy.ops.render.render(write_still=True)

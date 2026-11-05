@@ -5,13 +5,14 @@ export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigati
 export type Issue = 'Too fast' | 'No motion' | 'Wrong way' | 'Shaking' | 'Error message' | 'Other';
 export type Feedback = 'Better' | 'Same' | 'Worse' | 'Not sure';
 export type Joint = HardwareJoint;
-export type Phase = 'Home' | 'Reach' | 'Pause' | 'Return';
+export type Phase = 'Home' | 'Reach' | 'Pause' | 'Turn' | 'Return';
 export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits; assembly?: HardwareAssembly }
 export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string }
 export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
 export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string }
-export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string }
-export interface Task { id: string; name: string; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string }
+export interface ChangeCheckpoint { fileName:string; fileId?:string; existed:boolean; beforeContent:string; afterContent:string }
+export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; changeCheckpoint?: ChangeCheckpoint; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string }
+export interface Task { id: string; name: string; demoScenario?: DemoScenario; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string }
 export interface Workspace { version: 1; tasks: Task[]; activeTaskId: string; stage: Stage }
 export interface StorageLike { getItem(key: string): string | null; setItem(key: string, value: string): void }
 export const STORAGE_KEY = 'context-bridge.workspace.v1';
@@ -51,7 +52,7 @@ export function createExampleWorkspace(): Workspace {
     files: [
       makeFile('motion.py', '# Desktop arm · motion profile\nreach_easing = "ease_out"\nreturn_duration = 0.6\nservo_direction = 1\nstep_interval = 0.02\n\ndef return_home(arm):\n    # No fabricated servo angles: home comes from the calibrated controller.\n    arm.return_to_calibrated_home(duration=return_duration)\n', 'code', 'sample'),
       makeFile('hardware.json', JSON.stringify(hardwareDescription(), null, 2), 'hardware', 'sample'),
-      makeFile('run-06.log', '[00:00.000] profile=reach\n[00:00.600] J2 target=45 actual=44.8\n[00:01.200] reach complete\n[00:01.800] return complete\n[observer] Reach is stable. Return is abrupt.\n', 'log', 'sample'),
+      makeFile('run-06.log', '[00:00.000] profile=reach\n[00:00.600] reach command sent\n[00:01.200] reach complete\n[00:01.800] return complete\n[observer] Reach is stable. Return is abrupt.\n', 'log', 'sample'),
     ], rounds: [history, active],
   };
   const gripHistory: Round = { ...history, id: 'grip-round-1', number: 1,
@@ -90,7 +91,7 @@ export function completeHardwareSetup(state:Workspace):Workspace {
   if(!updated.files.some(file=>file.source!=='uploaded'&&file.kind==='hardware'&&['hardware.json','context-bridge-hardware.json'].includes(file.name))){
     next=updateTask(next,{files:[...updated.files,makeFile('context-bridge-hardware.json',JSON.stringify(hardwareContext(updated.hardware),null,2),'hardware','generated')]});
   }
-  return setStage(next,'first-run');
+  return setStage(ensureMotionContext(next),'first-run');
 }
 export function updateRound(state: Workspace, patch: Partial<Omit<Round, 'id' | 'number'>>, roundId = getActiveTask(state).activeRoundId): Workspace {
   const task = getActiveTask(state);
@@ -107,7 +108,7 @@ export function setStage(state: Workspace, stage: Stage): Workspace {
 export function reviseObservation(state: Workspace, patch: Partial<Observation>): Workspace {
   const round = getActiveRound(state);
   if (round.applied || round.completedAt) return state;
-  return updateRound(state, { observation: { ...round.observation, ...patch }, suggestion: undefined });
+  return updateRound(state, { observation: { ...round.observation, ...patch }, suggestion: undefined, changeCheckpoint: undefined });
 }
 /** Toggle against the latest state so rapid clicks and shortcuts never lose a selection. */
 export function toggleIssue(state: Workspace, issue: Issue): Workspace {
@@ -151,11 +152,120 @@ export function applyRoundChange(state: Workspace): Workspace {
   if (!suggestion) throw new Error('No suggestion to apply.');
   if (round.applied) return state;
   const existing = task.files.find(f => f.name === suggestion.fileName);
-  const content = existing ? (existing.content.includes(suggestion.codeBefore) ? existing.content.replace(suggestion.codeBefore, suggestion.codeAfter) : `${existing.content.trimEnd()}\n${suggestion.codeAfter}\n`) : `${suggestion.codeAfter}\n`;
+  const beforeContent=existing?.content??'';
+  // Never append a contradictory assignment if the file changed after review.
+  const assignment=motionAssignment(beforeContent,suggestion.parameter);
+  if(assignment&&!beforeContent.includes(suggestion.codeBefore))throw new Error('The motion file changed after this suggestion. Request an updated review before applying.');
+  const content = beforeContent.includes(suggestion.codeBefore)?beforeContent.replace(suggestion.codeBefore,suggestion.codeAfter):`${beforeContent.trimEnd()}${beforeContent?'\n':''}${suggestion.codeAfter}\n`;
   const file = existing ? { ...existing, content, size: new TextEncoder().encode(content).length, updatedAt: now() } : makeFile(suggestion.fileName, content, 'code', 'generated');
   const files = existing ? task.files.map(f => f.id === file.id ? file : f) : [...task.files, file];
-  return updateRound(updateTask(state, { files }), { applied: true });
+  return updateRound(updateTask(state, { files }), { applied: true,changeCheckpoint:{fileName:file.name,fileId:file.id,existed:!!existing,beforeContent,afterContent:content} });
 }
+/** Undo restores the complete reviewed file, including the absence of a generated file. */
+export function undoRoundChange(state:Workspace):Workspace {
+  const task=getActiveTask(state),round=getActiveRound(state),suggestion=round.suggestion;
+  if(!round.applied||!suggestion)return state;
+  const checkpoint=round.changeCheckpoint,file=task.files.find(f=>f.name===suggestion.fileName);
+  if(!file)throw new Error('The changed file is missing. Restore it before undoing.');
+  if(checkpoint&&file.content!==checkpoint.afterContent)throw new Error('The file has newer edits. Keep those edits or restore the reviewed version before undoing.');
+  if(!checkpoint&&!file.content.includes(suggestion.codeAfter))throw new Error('The changed parameter could not be found. Review the file before undoing.');
+  const content=checkpoint?checkpoint.beforeContent:file.content.replace(suggestion.codeAfter,suggestion.codeBefore);
+  const files=checkpoint&&!checkpoint.existed?task.files.filter(f=>f.id!==file.id):task.files.map(f=>f.id===file.id?{...f,content,size:new TextEncoder().encode(content).length,updatedAt:now()}:f);
+  return {...updateRound(updateTask(state,{files}),{applied:false,changeCheckpoint:undefined}),stage:'review'};
+}
+
+/** Filming scenarios use the same video choreography, with independent fault settings. */
+export type DemoScenario = 'shaking' | 'slow-return';
+export interface MotionSettings { variant: 'shaking' | 'stable'; returnDuration: number }
+export const DEFAULT_RETURN_DURATION = 1.5;
+export function motionProgram(scenario:DemoScenario='shaking'):string {
+  const easing=scenario==='shaking'?'linear':'minimum_jerk';
+  return `# Context Bridge · reference-video motion sequence
+# Waypoints come from the calibrated hardware adapter; no joint angles are inferred from video.
+motion_easing = "${easing}"
+return_duration = 1.5
+servo_direction = 1
+servo_enabled = True
+step_interval = 0.02
+
+
+def progress_curve(t):
+    t = max(0.0, min(1.0, t))
+    if motion_easing == "minimum_jerk":
+        return t * t * t * (10.0 - 15.0 * t + 6.0 * t * t)
+    return t
+
+
+def run_motion(arm):
+    # The adapter interpolates all calibrated axes using the same normalized curve.
+    arm.hold("home", duration=1.4)
+    arm.move("reach", duration=1.1, easing=progress_curve)
+    arm.grip_then_release(duration=1.5)
+    arm.move("lift_and_turn", duration=1.2, easing=progress_curve)
+    arm.hold("turned", duration=1.1)
+    arm.move("home", duration=return_duration, easing=progress_curve)
+    arm.hold("home", duration=1.7667)
+`;
+}
+const REFERENCE_FILE = 'motion-reference.json';
+const motionReference=()=>JSON.stringify({
+  source:'User-provided ideal-motion video',durationSeconds:9.5667,
+  sequence:['Home','Reach','Grip and release','Lift and turn','Hold','Return','Settle'],
+  referenceReturnSeconds:DEFAULT_RETURN_DURATION,
+  interpretation:'Visible sequence and approximate timing; calibrated joint angles remain in the hardware adapter.',
+},null,2);
+/** Adds a runnable profile description only when no user or example code already exists. */
+export function ensureMotionContext(state:Workspace):Workspace {
+  const task=getActiveTask(state);
+  if(!task.hardware.configured)return state;
+  const incoming:ProjectFile[]=[];
+  if(!task.files.some(file=>file.kind==='code'))incoming.push(makeFile('motion.py',motionProgram(task.demoScenario),'code','generated'));
+  if(!task.files.some(file=>file.name===REFERENCE_FILE))incoming.push(makeFile(REFERENCE_FILE,motionReference(),'note','generated'));
+  return incoming.length?upsertFiles(state,incoming):state;
+}
+/** Each request carries the current observation, never invented encoder measurements. */
+export function prepareAgentRequest(state:Workspace):Workspace {
+  const next=ensureMotionContext(state),task=getActiveTask(next),round=getActiveRound(next),o=round.observation;
+  const fileName=`round-${String(round.number).padStart(2,'0')}-observation.md`;
+  if(task.files.some(file=>file.name===fileName&&file.source==='uploaded'))return next;
+  const content=`# Round ${round.number} · user observation\n\nJoint: ${o.joint} · ${JOINTS[o.joint].name}\nPhase: ${o.phase}\nObserved: ${o.issues.join(', ')||'Not yet selected'}\nDesired: ${o.desired.join(', ')||'A more reliable movement'}\nDetails: ${o.detail.trim()||'No additional detail.'}\n\nEvidence source: user observation. No physical telemetry is inferred.\n`;
+  const old=task.files.find(file=>file.name===fileName);
+  return old?.content===content?next:upsertFiles(next,[makeFile(fileName,content,'note','generated')]);
+}
+/** Start a separate recording task; existing tasks, uploads and rounds stay untouched. */
+export function prepareDemoScenario(state:Workspace,scenario:DemoScenario):Workspace {
+  const next=createTask(state,scenario==='shaking'?'Desktop arm · stable movement':'Desktop arm · slower return');
+  const task=getActiveTask(next),round=getActiveRound(next),hardware:Hardware={...task.hardware,controller:'ESP32',connection:'USB serial · 115200 baud',joints:3,gripper:true,configured:true,assembly:existingArmAssembly(),notes:'Four-servo reference arm · calibrated waypoints supplied by the controller adapter.'};
+  round.observation={...round.observation,phase:scenario==='shaking'?'Turn':'Return',issues:[],desired:[scenario==='shaking'?'Smoother motion':'Slower return'],detail:'',includePrevious:false};
+  const prepared=updateTask(next,{demoScenario:scenario,hardware,files:[makeFile('motion.py',motionProgram(scenario),'code','sample'),makeFile('hardware.json',JSON.stringify(hardwareContext(hardware),null,2),'hardware','sample')],rounds:[round]});
+  return {...ensureMotionContext(prepared),stage:'first-run'};
+}
+/** Match a parameter assignment as written, preserving quotes and indentation for an exact diff. */
+export function motionAssignment(content:string,parameter:string):{line:string;value:string}|undefined {
+  const escaped=parameter.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  const match=content.match(new RegExp(`^([ \\t]*${escaped}[ \\t]*=[ \\t]*([^\\n#]+?))[ \\t]*(?:#.*)?$`,'m'));
+  return match?{line:match[1],value:match[2].trim()}:undefined;
+}
+export function motionSource(task:Task):ProjectFile|undefined {
+  return task.files.find(file=>file.name==='motion.py'&&file.kind==='code')??task.files.find(file=>file.kind==='code');
+}
+/** The same file state drives first run, observation replay, proposal comparison and the test. */
+export function readMotionSettings(task:Task,round:Round,version:'current'|'before'|'after'='current'):MotionSettings {
+  const source=motionSource(task);let content=source?.content??'';
+  if(version==='before'&&round.changeCheckpoint)content=round.changeCheckpoint.beforeContent;
+  const suggestion=round.suggestion;
+  let easing=motionAssignment(content,'motion_easing')?.value.replace(/["']/g,'');
+  let duration=Number(motionAssignment(content,'return_duration')?.value);
+  if(suggestion&&version!=='current'){
+    const value=version==='after'?suggestion.after:suggestion.before;
+    if(suggestion.parameter==='motion_easing')easing=value.replace(/["']/g,'');
+    if(suggestion.parameter==='return_duration')duration=Number(value);
+  }
+  // Old files without an easing setting still get the selected before/after observation.
+  const shaky=easing?easing==='linear':round.observation.issues.includes('Shaking')&&!(round.applied&&version==='current');
+  return {variant:shaky?'shaking':'stable',returnDuration:Number.isFinite(duration)&&duration>0?Math.min(8,Math.max(.3,duration)):DEFAULT_RETURN_DURATION};
+}
+
 function isObject(v: unknown): v is Record<string, unknown> { return !!v && typeof v === 'object'; }
 function isValidWorkspace(value: unknown): value is Workspace {
   if (!isObject(value) || value.version !== 1 || !Array.isArray(value.tasks) || !value.tasks.length || !STAGES.includes(value.stage as Stage)) return false;
@@ -198,8 +308,16 @@ export function loadWorkspace(storage = browserStorage()): Workspace {
       const files=task.files.map(file=>file.source==='sample'&&file.name==='hardware.json'?{...file,content:JSON.stringify(hardwareDescription(hardware.controller),null,2),updatedAt:now(),size:new TextEncoder().encode(JSON.stringify(hardwareDescription(hardware.controller),null,2)).length}:file);
       return {...task,hardware,rounds,files};
     });
+    // Pending recommendations from the old shaking demo must be reviewed again.
+    // Applied/completed rounds and every project file remain an exact history.
+    let activeSuggestionReset=false;
+    value.tasks=value.tasks.map(task=>({...task,rounds:task.rounds.map(round=>{
+      if(round.applied||round.completedAt||!round.observation.issues.includes('Shaking')||round.suggestion?.parameter!=='step_interval')return round;
+      if(task.id===value.activeTaskId&&round.id===task.activeRoundId)activeSuggestionReset=true;
+      return {...round,suggestion:undefined,changeCheckpoint:undefined};
+    })}));
     // Work in flight is restartable; a refresh never pretends an interrupted operation completed.
-    const stage = value.stage === 'investigating' ? 'request' : value.stage === 'applying' ? 'review' : value.stage;
+    const stage = activeSuggestionReset&&['review','applying'].includes(value.stage) ? 'request' : value.stage === 'investigating' ? 'request' : value.stage === 'applying' ? 'review' : value.stage;
     return { ...value, stage };
   } catch { return createInitialWorkspace(); }
 }

@@ -18,8 +18,19 @@ npm run dev
 - Guided hardware assembly (category → base → shoulder → forearm → gripper → connection review) → baseline → observe → request → investigation → review → apply → test → feedback.
 - Saving feedback starts the next observation round in the same task. New/switch task enters hardware setup.
 - Files can be imported, previewed, removed, downloaded, and exported with a complete task. The demo accepts code/JSON/log/CSV/text files up to 1 MB each.
-- Applying a suggestion updates the example source file in local state. Undo restores the prior parameter. Real hardware is never contacted.
+- Applying a suggestion updates the example source file in local state. Undo restores the exact pre-change source file and protects later edits. Real hardware is never contacted.
 - Cancellation stops mock work, and refreshing interrupted work returns to a retryable screen. Workspace data is versioned and persisted in localStorage.
+
+## Motion filming scenarios
+
+Open the task sidebar → **Motion examples**. Each option creates a fresh task without replacing existing projects:
+
+- **Steadier motion**: play the initial movement → select **Shaking** and **Smoother motion** → Prepare request → Send to BIT → compare **Before / Proposed** → Apply change → Run → Continue to feedback → Better → next observation round.
+- **Slower return**: select **Too fast** and **Slower return**. The reviewed change doubles only `return_duration` (1.5 → 3.0 seconds in the new example); other movements keep their original timing. Existing 0.6 → 1.2 second examples continue to work.
+
+The supplied reference sequence is visually reconstructed as Home → Reach → Grip & pause → Lift & turn → Return & settle (about 9.57 seconds). The shaky version follows the same targets with joint oscillation and linear ramps; the proposed stable version uses minimum-jerk transitions. The video provides visual poses, not measured servo calibration.
+
+`motion.py`, the hardware configuration, the motion reference and the current round observation travel together in the request. The request viewer uses the same payload as the HTTP adapter, including its previous-round filter. The stability change is `motion_easing = "linear"` → `"minimum_jerk"`; Apply changes the file and playback profile together. Both initial and post-change runs play once, stop, and wait for a manual Continue. Replay never advances the workflow.
 
 ## Visual fidelity and motion
 
@@ -55,7 +66,7 @@ Old arm presets migrate J2 (formerly elbow) → J3 and J3 (formerly wrist / end 
 To rebuild only the hardware compatibility movie and its projected four-motor label track:
 
 ```sh
-ROBOT_RENDER_MODES=arm python scripts/build-robot-fallbacks.py
+ROBOT_RENDER_MODES=arm-stable,arm-shaking python scripts/build-robot-fallbacks.py
 ```
 
 Assembly topology was cross-checked against [the original EEZYbotARM assembly guide](https://www.instructables.com/EEZYbotARM/) and [the manufacturer's four-servo assembly photos](https://www.xiaodingchui.com/52549). These are structural references, not confirmation of the owner's servo calibration or an assertion of an exact kit identity.
