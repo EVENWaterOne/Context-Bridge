@@ -21,7 +21,24 @@ test('a fresh filming task preserves previous projects and begins before any obs
   assert.deepEqual(getActiveRound(state).observation.issues,[]);
   assert.deepEqual(getActiveRound(state).observation.desired,['Smoother motion']);
   assert.equal(getActiveRound(state).observation.phase,'Turn');
-  assert.deepEqual(readMotionSettings(getActiveTask(state),getActiveRound(state)),{variant:'shaking',returnDuration:1.5});
+  assert.deepEqual(readMotionSettings(getActiveTask(state),getActiveRound(state)),{variant:'stable',returnDuration:1.5});
+  assert.deepEqual(readMotionSettings(getActiveTask(state),getActiveRound(state),'reference'),{variant:'stable',returnDuration:1.5});
+});
+
+test('the ideal reference stays stable while shaking is introduced only by a user observation',()=>{
+  let state=prepareDemoScenario(createInitialWorkspace(),'shaking');
+  const originalFiles=structuredClone(getActiveTask(state).files);
+  state=reviseObservation(state,{issues:['Shaking'],desired:['Smoother motion']});
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state)).variant,'shaking');
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state),'before').variant,'shaking');
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state),'reference').variant,'stable');
+  state=updateRound(state,{suggestion:buildSuggestion(context(state))});
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state),'after').variant,'stable');
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state)).variant,'shaking');
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state),'reference').variant,'stable');
+  assert.deepEqual(getActiveTask(state).files,originalFiles);
+  state=reviseObservation(state,{issues:[]});
+  assert.equal(readMotionSettings(getActiveTask(state),getActiveRound(state)).variant,'stable');
 });
 
 test('shaking request, reviewed code, applied animation and exact undo share one motion profile',async()=>{
@@ -51,6 +68,7 @@ test('the parallel slow-return scenario changes only timing and remains stable',
   state=updateRound(state,{suggestion});
   assert.deepEqual(readMotionSettings(getActiveTask(state),getActiveRound(state),'before'),{variant:'stable',returnDuration:1.5});
   assert.deepEqual(readMotionSettings(getActiveTask(state),getActiveRound(state),'after'),{variant:'stable',returnDuration:3});
+  assert.deepEqual(readMotionSettings(getActiveTask(state),getActiveRound(state),'reference'),{variant:'stable',returnDuration:1.5});
 });
 
 test('legacy motion files and newly configured tasks can both enter the shaking branch without rewriting uploads',()=>{

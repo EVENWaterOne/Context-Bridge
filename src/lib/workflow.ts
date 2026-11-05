@@ -249,20 +249,21 @@ export function motionAssignment(content:string,parameter:string):{line:string;v
 export function motionSource(task:Task):ProjectFile|undefined {
   return task.files.find(file=>file.name==='motion.py'&&file.kind==='code')??task.files.find(file=>file.kind==='code');
 }
-/** The same file state drives first run, observation replay, proposal comparison and the test. */
-export function readMotionSettings(task:Task,round:Round,version:'current'|'before'|'after'='current'):MotionSettings {
+/** First run shows the ideal reference; later comparisons visualize the user's observation. */
+export function readMotionSettings(task:Task,round:Round,version:'reference'|'current'|'before'|'after'='current'):MotionSettings {
   const source=motionSource(task);let content=source?.content??'';
   if(version==='before'&&round.changeCheckpoint)content=round.changeCheckpoint.beforeContent;
   const suggestion=round.suggestion;
   let easing=motionAssignment(content,'motion_easing')?.value.replace(/["']/g,'');
   let duration=Number(motionAssignment(content,'return_duration')?.value);
-  if(suggestion&&version!=='current'){
+  if(suggestion&&(version==='before'||version==='after')){
     const value=version==='after'?suggestion.after:suggestion.before;
     if(suggestion.parameter==='motion_easing')easing=value.replace(/["']/g,'');
     if(suggestion.parameter==='return_duration')duration=Number(value);
   }
-  // Old files without an easing setting still get the selected before/after observation.
-  const shaky=easing?easing==='linear':round.observation.issues.includes('Shaking')&&!(round.applied&&version==='current');
+  // Shaking is an observation, not an assumption derived from the baseline code.
+  // The reference remains ideal even when a reported issue or proposal is present.
+  const shaky=version!=='reference'&&round.observation.issues.includes('Shaking')&&(easing?easing==='linear':!(round.applied&&version==='current'));
   return {variant:shaky?'shaking':'stable',returnDuration:Number.isFinite(duration)&&duration>0?Math.min(8,Math.max(.3,duration)):DEFAULT_RETURN_DURATION};
 }
 
