@@ -74,6 +74,9 @@ The current category is explicitly the owner's four-servo linkage arm, not a gen
 
 - `POST /api/agent/investigate` → `Suggestion`
 - `POST /api/agent/apply` → `ApplyResult`
+- `POST /api/agent/run` → `RunResult` (`status: 'completed'`, `mode: 'simulated' | 'hardware'`, `message`)
+
+Preview and Replay only play the browser animation. Run also calls `runMotion` with the current hardware, files and round; the default mock simulates execution and explicitly reports that no physical hardware moved. A future hardware backend should resolve the request when its run has finished, not merely when it accepts the command. Neither animation completion nor a run result advances the page: the user observes the movement and chooses Continue. Cancellation is passed through `AbortSignal`; a future hardware adapter must implement its own device stop protocol rather than treating an aborted HTTP request as proof that motion stopped.
 
 Request body: `{ version: 1, task, round }`. Keep all provider API keys on the server. The frontend does not include or request API keys. This version does not authenticate remote users, synchronize accounts, or communicate with real hardware; the login form only opens the local demo and never persists passwords.
 

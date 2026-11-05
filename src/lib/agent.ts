@@ -3,8 +3,9 @@ export interface AgentContext { task: Task; round: Round }
 export interface AgentProgress { progress: number; message: string }
 export interface AgentOptions { signal?: AbortSignal; onProgress?: (progress: AgentProgress) => void; durationMs?: number }
 export interface ApplyResult { status: 'applied'; suggestionId: string; changedFiles: string[]; message: string }
+export interface RunResult { status: 'completed'; mode: 'simulated' | 'hardware'; message: string }
 /** Replace this adapter when a server-side Agent connection is available. Never place API secrets in browser code. */
-export interface AgentAdapter { investigate(context: AgentContext, options?: AgentOptions): Promise<Suggestion>; applySuggestion(context: AgentContext, options?: AgentOptions): Promise<ApplyResult> }
+export interface AgentAdapter { investigate(context: AgentContext, options?: AgentOptions): Promise<Suggestion>; applySuggestion(context: AgentContext, options?: AgentOptions): Promise<ApplyResult>; runMotion(context: AgentContext, options?: AgentOptions): Promise<RunResult> }
 function abortError() { return new DOMException('Operation cancelled', 'AbortError'); }
 function pause(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -60,6 +61,10 @@ export const mockAgent: AgentAdapter = {
     await progress(['Preparing a local checkpoint', 'Updating the motion parameter', 'Checking the change', 'Ready for your test'], options, 10400);
     return { status: 'applied', suggestionId: suggestion.id, changedFiles: [suggestion.fileName], message: 'Local example code updated. No physical hardware moved.' };
   },
+  async runMotion(_context, options = {}) {
+    await progress(['Preparing the demo run', 'Simulating code execution'], options, 1200);
+    return { status: 'completed', mode: 'simulated', message: 'Demo run complete. No code was executed on physical hardware.' };
+  },
 };
 /** Explicit opt-in HTTP adapter. The endpoint should be your own authenticated server, which holds secrets. */
 export function createHttpAgent(baseUrl: string, request: typeof fetch = fetch): AgentAdapter {
@@ -73,6 +78,6 @@ export function createHttpAgent(baseUrl: string, request: typeof fetch = fetch):
     options.onProgress?.({ progress: 100, message: 'Ready' });
     return body;
   };
-  return { investigate: (context, options) => call<Suggestion>('investigate', context, options), applySuggestion: (context, options) => call<ApplyResult>('apply', context, options) };
+  return { investigate: (context, options) => call<Suggestion>('investigate', context, options), applySuggestion: (context, options) => call<ApplyResult>('apply', context, options), runMotion: (context, options) => call<RunResult>('run', context, options) };
 }
 export const agent = mockAgent;
