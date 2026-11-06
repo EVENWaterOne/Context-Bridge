@@ -7,7 +7,7 @@ from pathlib import Path
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 modes=os.environ.get('ROBOT_RENDER_MODES','arm,hero,inspect,build').split(',')
-if not modes or any(mode not in ['arm','hero','inspect','build'] for mode in modes):raise ValueError('Unknown render mode')
+if not modes or any(mode not in ['arm','arm-stable','arm-shaking','hero','inspect','build'] for mode in modes):raise ValueError('Unknown render mode')
 sources=['src/components/HardwareArm.ts','src/components/hardwareKinematics.ts','src/lib/hardware.ts','src/components/RobotScene.ts','src/components/robotMotion.ts','scripts/export-robot-scenes.mjs','scripts/render-robot-fallback.py','scripts/build-robot-fallbacks.py']
 fingerprint=hashlib.sha256(b''.join(Path(p).read_bytes() for p in sources)).hexdigest()[:12]
 cache=Path('.render-cache')/fingerprint;cache.mkdir(parents=True,exist_ok=True)

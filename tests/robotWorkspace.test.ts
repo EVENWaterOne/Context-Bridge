@@ -4,6 +4,7 @@ import { Vector3, Quaternion, Mesh, Raycaster, SRGBColorSpace } from 'three';
 import { createRobotModel, bandColor } from '../src/components/RobotScene.ts';
 import { BUILD_DURATION, INSPECT_DURATION, motionPose, waitingMotion } from '../src/components/robotMotion.ts';
 import { layoutJointLabels } from '../src/components/robotLabels.ts';
+import { armMotionDuration } from '../src/components/hardwareKinematics.ts';
 
 test('turning BIT toward the work preserves exact pickup and placement contacts', () => {
   const model = createRobotModel('build');
@@ -87,7 +88,7 @@ test('arm motion and its joint callouts stay within the model area at narrow and
     const meshes:Mesh[]=[];model.scene.traverse(o=>{if(o instanceof Mesh){o.geometry.computeBoundingBox();meshes.push(o)}});
     for(const [width,height] of [[280,400],[400,400],[560,350]]){
       model.setAspect(width/height);
-      for(let t=0;t<7.2;t+=.24){
+      for(let t=0;t<armMotionDuration();t+=.24){
         model.update(t,'J2');
         for(const mesh of meshes){
           const b=mesh.geometry.boundingBox!;
