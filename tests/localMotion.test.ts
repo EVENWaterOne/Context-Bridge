@@ -57,7 +57,7 @@ test('the reference animation stays the same after a shaking report and an appli
   assert.deepEqual(illustratedMotion(getActiveTask(state),getActiveRound(state),'demo','reference'),{variant:'stable',returnDuration:1.2});
 });
 
-test('legacy apply still appends a missing parameter but refuses a contradicting or repeated one',()=>{
+test('legacy apply appends only a missing motion_easing line and refuses a contradicting, repeated or other missing one',()=>{
   const ready=(content:string)=>{
     let state=reviseObservation(createExampleWorkspace(),{issues:['Shaking']});
     state=updateRound(state,{suggestion:buildSuggestion({task:getActiveTask(state),round:getActiveRound(state)})});
@@ -67,6 +67,11 @@ test('legacy apply still appends a missing parameter but refuses a contradicting
   assert.match(getActiveTask(applyRoundChange(ready('servo_direction = 1\n'))).files.find(f=>f.name==='motion.py')!.content,/motion_easing = "minimum_jerk"\n$/);
   assert.throws(()=>applyRoundChange(ready('motion_easing = "ease_out"\n')),/changed after this suggestion/);
   assert.throws(()=>applyRoundChange(ready('motion_easing = "linear"\nmotion_easing = "linear"\n')),/ambiguous/);
+  // The example motion.py has no serial_timeout: an Error message proposal must not append one.
+  let state=reviseObservation(createExampleWorkspace(),{issues:['Error message']});
+  state=updateRound(state,{suggestion:buildSuggestion({task:getActiveTask(state),round:getActiveRound(state)})});
+  assert.equal(getActiveRound(state).suggestion!.parameter,'serial_timeout');
+  assert.throws(()=>applyRoundChange(state),/source changed/);
 });
 
 test('an old browser workspace is imported with the demo files unchecked and the user files as they were',()=>{

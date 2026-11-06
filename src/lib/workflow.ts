@@ -165,6 +165,8 @@ export function applyRoundChange(state: Workspace): Workspace {
   if (matches > 1) throw new Error(ambiguousSource);
   // Never append a contradictory assignment if the file changed after review.
   if (!matches && motionAssignment(beforeContent, suggestion.parameter)) throw new Error('The motion file changed after this suggestion. Request an updated review before applying.');
+  // Only the demo's easing switch may add its line: older example files predate motion_easing. Any other missing parameter means the source changed.
+  if (!matches && suggestion.parameter !== 'motion_easing') throw new Error(ambiguousSource);
   const content = matches ? beforeContent.replace(suggestion.codeBefore, suggestion.codeAfter) : `${beforeContent.trimEnd()}${beforeContent ? '\n' : ''}${suggestion.codeAfter}\n`;
   const file = existing ? { ...existing, content, size: new TextEncoder().encode(content).length, updatedAt: now() } : makeFile(suggestion.fileName, content, 'code', 'generated');
   const files = existing ? task.files.map(f => f.id === file.id ? file : f) : [...task.files, file];
