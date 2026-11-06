@@ -102,7 +102,8 @@ function launch(command: string, options: ShellOptions): { file: string; args: s
   let shell: { file: string; args: string[] };
   if (process.platform === 'win32') {
     script = join(options.scriptDir ?? tmpdir(), `context-bridge-${randomUUID()}.cmd`);
-    writeFileSync(script, `@echo off\r\n${command}\r\n`, 'utf8');
+    // cmd.exe reads a script in the console code page, so UTF-8 text such as a Chinese folder name needs 65001 first.
+    writeFileSync(script, `@echo off\r\nchcp 65001 >nul 2>&1\r\n${command}\r\n`, 'utf8');
     shell = { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/c', script] };
   } else shell = { file: '/bin/sh', args: ['-c', command] };
   if (!sandbox) return { ...shell, script };
