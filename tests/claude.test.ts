@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { ClaudeProvider } from '../server/claude.ts';
@@ -290,4 +290,89 @@ test('closing while the SDK loads never starts Claude Code', async t => {
 test('Claude Code login() points to API-key setup instead of a subscription sign-in', async t => {
   const { provider } = await setup(t);
   await assert.rejects(provider.login(), /Anthropic API key/);
+});
+
+// Run mode: the agent works in a copy inside the run folder, with the shell sandboxed by the OS.
+async function runFolder(dataDir: string) {
+  const snapshot = join(dataDir, 'runs', 'job'), workspace = join(snapshot, 'work', 'arm_project');
+  await mkdir(workspace, { recursive: true });
+  return { snapshot, workspace };
+}
+const toolResult = (id: string, content: string, isError = false) => ({ uuid: '00000000-0000-4000-8000-000000000000', session_id: 'fake-session', type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content }] } }) as never;
+const RUN_TOOLS = ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Write', 'StructuredOutput'];
+
+test('run mode: Claude Code works in the copy with sandboxed commands, and commands and edits are reported', async t => {
+  const answer = { outcome: 'proposal' };
+  const { provider, sdk, dataDir } = await setup(t, () => [
+    message.init(RUN_TOOLS),
+    message.toolUse('Bash', { command: 'node check.js', description: 'Run the check' }),
+    toolResult('toolu_1', 'Exit code 1\ntoo slow 3', true),
+    message.toolUse('Edit', { file_path: 'motion.py', old_string: '3', new_string: '1.2' }),
+    message.result('', { structured_output: answer }),
+  ]);
+  provider.saveApiKey(KEY);
+  const { snapshot, workspace } = await runFolder(dataDir);
+  const run = request({ snapshotDir: snapshot, workspace, outputSchema: { type: 'object' } });
+  const events: { type: string; text?: string; command?: unknown }[] = [];
+  const result = await provider.run({ ...run, onEvent: event => events.push(event) });
+  assert.deepEqual(JSON.parse(result.text), answer);
+  const options = sdk.runs()[0].options;
+  const real = await realpath(workspace), data = await realpath(dataDir), temp = await realpath(join(snapshot, 'tmp'));
+  assert.equal(options.cwd, real);
+  assert.deepEqual(options.tools, ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep']);
+  assert.deepEqual(options.allowedTools, ['Edit(/**)'], 'Never a bare tool name, which would allow any path');
+  assert.equal(options.permissionMode, 'dontAsk');
+  assert.deepEqual(options.settingSources, []);
+  assert.deepEqual(options.sandbox, {
+    enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false,
+    network: { allowedDomains: [] },
+    filesystem: { allowWrite: [temp], denyRead: [data], allowRead: [real, temp] },
+    credentials: { envVars: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'CODEX_API_KEY'].map(name => ({ name, mode: 'deny' })) },
+  });
+  assert.equal(options.env?.TMPDIR, temp);
+  assert.match(String(options.systemPrompt), /private copy of the user's project/);
+  assert.deepEqual(events.filter(event => event.type === 'command').map(event => event.command), [
+    { id: 'toolu_1', command: 'node check.js', status: 'running' },
+    { id: 'toolu_1', command: 'node check.js', status: 'failed', exitCode: 1, output: 'too slow 3' },
+  ]);
+  assert.ok(events.some(event => event.type === 'status' && event.text === 'Claude Code is editing motion.py in the project copy'));
+});
+
+for (const [name, script] of [
+  ['an unsandboxed command', () => [message.init(RUN_TOOLS), message.toolUse('Bash', { command: 'ls', dangerouslyDisableSandbox: true })]],
+  ['a tool outside the run set', () => [message.init(RUN_TOOLS), message.toolUse('WebFetch', { url: 'https://example.com' })]],
+  ['extra tools at start', () => [message.init([...RUN_TOOLS, 'WebFetch'])]],
+] as [string, Script][]) test(`run mode stops on ${name}`, async t => {
+  const { provider, dataDir } = await setup(t, script);
+  provider.saveApiKey(KEY);
+  const { snapshot, workspace } = await runFolder(dataDir);
+  await assert.rejects(provider.run(request({ snapshotDir: snapshot, workspace })), /outside its sandbox|disabled tool|safety configuration/);
+});
+
+test('run mode refuses a working copy outside the run folder, and without run mode no tools are offered', async t => {
+  const { provider, sdk, dataDir } = await setup(t, () => [message.init(), message.text('ok'), message.result('ok')]);
+  provider.saveApiKey(KEY);
+  const { snapshot } = await runFolder(dataDir);
+  const outside = await mkdtemp(join(tmpdir(), 'context-bridge-outside-'));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await assert.rejects(provider.run(request({ snapshotDir: snapshot, workspace: outside })), /project copy inside the run folder/);
+  await assert.rejects(provider.run(request({ snapshotDir: snapshot, workspace: snapshot })), /project copy inside the run folder/);
+  await provider.run(request({ snapshotDir: snapshot }));
+  const options = sdk.runs().at(-1)!.options;
+  assert.deepEqual(options.tools, []);
+  assert.equal(options.sandbox, undefined);
+});
+
+test('run mode needs the OS sandbox: Linux needs bubblewrap and socat on PATH, Windows has none', { skip: process.platform !== 'linux' && 'Linux only' }, async t => {
+  const { provider } = await setup(t);
+  const bin = await mkdtemp(join(tmpdir(), 'context-bridge-bin-'));
+  const previous = process.env.PATH;
+  t.after(async () => { process.env.PATH = previous; await rm(bin, { recursive: true, force: true }); });
+  process.env.PATH = bin;
+  let access = await provider.commandAccess();
+  assert.equal(access.available, false);
+  assert.match(access.note, /missing: bwrap, socat/);
+  for (const name of ['bwrap', 'socat']) { await writeFile(join(bin, name), '#!/bin/sh\n'); await chmod(join(bin, name), 0o755); }
+  access = await provider.commandAccess();
+  assert.equal(access.available, true);
 });

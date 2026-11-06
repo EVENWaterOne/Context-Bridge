@@ -4,12 +4,15 @@ import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { CodexProvider } from './provider.ts';
-import type { ProviderId } from '../src/lib/backend-types.ts';
+import type { ExecutionInfo, ProviderId } from '../src/lib/backend-types.ts';
 import { ProviderSwitch, isProviderId, type ProviderFactory } from './providers.ts';
 import { ClaudeProvider } from './claude.ts';
 import { Store } from './store.ts';
 import { FileService } from './files.ts';
-import { Jobs } from './jobs.ts';
+import { Jobs, detectCommand } from './jobs.ts';
+import { listProject } from './workcopy.ts';
+import type { Sandbox } from './runner.ts';
+import { filePath } from './store.ts';
 import { BridgeError, conflict, invalid, missing } from './errors.ts';
 
 export interface AppOptions {
@@ -25,6 +28,8 @@ export interface AppOptions {
   staticDir?: string;
   fileFault?: (phase: 'after-write', index: number) => void;
   timeoutMs?: number;
+  /** Run code while diagnosing: the default for tasks without a saved choice (on), and its time limit. */
+  runCode?: { byDefault?: boolean; timeoutMs?: number; sandbox?: () => Promise<Sandbox | undefined> };
 }
 export async function createApp(options: AppOptions) {
   const dataDir = resolve(options.dataDir);
@@ -40,7 +45,7 @@ export async function createApp(options: AppOptions) {
     };
   const saved = store.preference('provider');
   const provider = new ProviderSwitch(factories, isProviderId(saved) ? saved : options.defaultProvider ?? 'codex');
-  const jobs = new Jobs(store, files, provider, dataDir, options.timeoutMs);
+  const jobs = new Jobs(store, files, provider, dataDir, options.timeoutMs, options.runCode);
   const app = Fastify({ bodyLimit: 16 * 1024 * 1024, logger: false });
   const session = randomBytes(32).toString('hex');
   app.decorate('bridge', { store, files, jobs, provider });
@@ -126,6 +131,26 @@ export async function createApp(options: AppOptions) {
     return files.bind(params(request.params).id, str(b.rootId, 'rootId'), b.paths as string[]);
   });
   app.post('/api/tasks/:id/project/refresh', async request => files.refresh(params(request.params).id));
+  // Run settings name a command that runs on this computer, so only this API changes them: workspace
+  // saves keep the stored value and imports drop it.
+  app.get('/api/tasks/:id/execution', async (request): Promise<ExecutionInfo> => {
+    const task = store.task(params(request.params).id);
+    const listed = await listProject(task);
+    const own = new Map(task.files.map(f => [filePath(f), f.content]));
+    const detected = detectCommand(task, listed.paths, rel => own.get(rel) ?? listed.read(rel));
+    const active = await provider.provider().catch(() => undefined);
+    const tools = active ? active.knownAccess?.() ?? (active.commandAccess ? undefined : { available: false, note: `${provider.label} cannot run commands in this service.` }) : undefined;
+    const checker = !!(await jobs.sandbox().catch(() => undefined));
+    return { enabled: jobs.runsCode(task), ...(task.execution?.command ? { command: task.execution.command } : {}), ...(detected ? { detected } : {}), sandbox: active?.sandbox?.() ?? `${provider.label} runs commands in the project copy.`, ...(tools ? { tools } : {}), checker };
+  });
+  app.put('/api/tasks/:id/execution', async request => {
+    const b = body(request.body), id = params(request.params).id;
+    if (typeof b.enabled !== 'boolean') throw invalid('enabled must be true or false.');
+    if (b.command !== undefined && b.command !== null && (typeof b.command !== 'string' || b.command.length > 2000 || /[\0\r\n]/.test(b.command))) throw invalid('Enter the verification command on one line, up to 2,000 characters.');
+    store.task(id);
+    const command = typeof b.command === 'string' && b.command.trim() ? b.command.trim() : undefined;
+    return store.mutate(s => ({ ...s, tasks: s.tasks.map(t => t.id !== id ? t : { ...t, execution: { enabled: b.enabled as boolean, ...(command ? { command } : {}) } }) }));
+  });
   app.post('/api/agent/investigate', async (request, reply) => {
     const b = body(request.body);
     if (b.answer !== undefined && (typeof b.answer !== 'string' || b.answer.length > 20000)) throw invalid('Enter an answer up to 20,000 characters.');

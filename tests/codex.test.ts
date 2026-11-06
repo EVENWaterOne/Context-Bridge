@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalCodexProvider } from '../server/codex.ts';
@@ -31,7 +31,13 @@ createInterface({input:process.stdin}).on('line',line=>{
  }
  if(m.method==='account/login/start'){reply(m,{type:'chatgpt',loginId:'login-1',authUrl:'https://auth.openai.com/test'});return;}
  if(m.method==='model/list'){reply(m,{data:[{id:'catalog-id',model:'gpt-test',displayName:'Test model',isDefault:true,hidden:false}],nextCursor:null});return;}
- if(m.method==='thread/start'){reply(m,{thread:{id:'thread-1'}});return;}
+ if(m.method==='thread/start'){
+  const write=m.params.sandbox==='workspace-write';
+  reply(m,{thread:{id:'thread-1'},sandbox:write?{type:'workspaceWrite',writableRoots:[],networkAccess:mode==='runnet'}:{type:'readOnly'}});
+  if(mode==='runwarning')event('configWarning',{summary:'Codex is ignoring 1 unrecognized configuration setting.',details:'session-flags: features.sleep_tool is ignored'});
+  return;
+ }
+ if(m.method==='thread/unsubscribe'){reply(m,{status:'unsubscribed'});return;}
  if(m.method==='turn/start'){
   if(mode==='crash'){process.exit(7);return;}
   if(mode==='rpcerror'){send({id:m.id,error:{message:'request rejected'}});return;}
@@ -41,6 +47,14 @@ createInterface({input:process.stdin}).on('line',line=>{
   if(mode==='tool'){event('item/started',{threadId:'thread-1',turnId:'turn-1',item:{id:'tool-1',type:'fileChange'}});return;}
   if(mode==='approval'){send({id:'server-approval',method:'item/fileChange/requestApproval',params:{threadId:'thread-1',turnId:'turn-1'}});return;}
   if(mode==='failure'){terminal('failed');return;}
+  if(mode==='run'){
+   const ws=m.params.cwd, item={id:'call_1',type:'commandExecution',command:"/bin/bash -lc 'node check.js'",cwd:ws,status:'inProgress',commandActions:[{type:'unknown',command:'node check.js'}],aggregatedOutput:null,exitCode:null,durationMs:null};
+   event('item/started',{threadId:'thread-1',turnId:'turn-1',item});
+   event('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{...item,status:'failed',aggregatedOutput:'too slow 3\\n',exitCode:1,durationMs:40}});
+   event('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'call_2',type:'fileChange',status:'completed',changes:[{path:ws+'/motion.py',kind:{type:'update',move_path:null},diff:''}]}});
+   event('item/completed',{threadId:'thread-1',turnId:'turn-1',item:{id:'answer',type:'agentMessage',phase:'final_answer',text:'{"answer":"done"}'}});
+   terminal('completed');return;
+  }
   if(mode==='empty'){terminal('completed');return;}
   if(mode==='oversized'){
    event('item/agentMessage/delta',{threadId:'thread-1',turnId:'turn-1',itemId:'large-comment',delta:'x'.repeat(5*1024*1024)});
@@ -208,3 +222,42 @@ test('real paths outside application-owned snapshots are rejected', async t => {
   await assert.rejects(fixture.provider.run({ ...fixture.request(), snapshotDir: dirnameForTest(fixture.root) }), /requires a snapshot/);
 });
 function dirnameForTest(path: string): string { return join(path, '..'); }
+
+test('run mode: the thread gets a sandbox that writes only the copy, commands and edits are reported, and Codex is restarted to end background commands', async t => {
+  const fixture = await setup(t, 'run');
+  const workspace = join(fixture.snapshot, 'work', 'arm_project'); await mkdir(workspace, { recursive: true });
+  const events: { type: string; text?: string; command?: Record<string, unknown> }[] = [];
+  const result = await fixture.provider.run({ ...fixture.request(), workspace, onEvent: event => events.push(event as never) });
+  assert.equal(result.text, '{"answer":"done"}');
+  const messages = await fixture.requests();
+  const start = messages.find(m => m.method === 'thread/start').params, turn = messages.find(m => m.method === 'turn/start').params;
+  const real = await realpath(workspace), temp = await realpath(join(fixture.snapshot, 'tmp'));
+  assert.equal(start.cwd, real); assert.equal(start.sandbox, 'workspace-write'); assert.equal(start.approvalPolicy, 'never');
+  assert.equal(start.config['features.shell_tool'], true);
+  assert.equal(start.config['features.view_image'], false, 'Image viewing could read files outside the sandbox');
+  assert.deepEqual(start.config.sandbox_workspace_write, { writable_roots: [real, temp], network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: true });
+  assert.equal(start.config['shell_environment_policy.inherit'], 'core');
+  assert.match(start.baseInstructions, /private copy of the user's project/);
+  assert.deepEqual(turn.sandboxPolicy, { type: 'workspaceWrite', writableRoots: [real, temp], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true });
+  assert.deepEqual(events.filter(e => e.type === 'command').map(e => e.command), [
+    { id: 'call_1', command: 'node check.js', status: 'running' },
+    { id: 'call_1', command: 'node check.js', status: 'failed', exitCode: 1, output: 'too slow 3\n', durationMs: 40 },
+  ]);
+  assert.ok(events.some(e => e.type === 'status' && e.text === 'Codex edited motion.py in the project copy'));
+  // Closing the thread does not end a background command, so the app-server ends after each run-mode run.
+  await fixture.provider.run({ ...fixture.request(), workspace, onEvent: () => {} });
+  assert.equal((await fixture.requests()).filter(m => m.method === 'initialize').length, 2, 'The next request starts a fresh app-server');
+});
+
+for (const mode of ['runwarning', 'runnet']) test(`${mode}: run mode stops when Codex did not apply the sandbox settings`, async t => {
+  const fixture = await setup(t, mode);
+  const workspace = join(fixture.snapshot, 'work', 'arm_project'); await mkdir(workspace, { recursive: true });
+  await assert.rejects(fixture.provider.run({ ...fixture.request(), workspace }), /safety configuration was not applied/);
+});
+
+test('run mode: a working copy outside the run folder is refused', async t => {
+  const fixture = await setup(t, 'run');
+  const outside = join(fixture.root, 'elsewhere'); await mkdir(outside, { recursive: true });
+  await assert.rejects(fixture.provider.run({ ...fixture.request(), workspace: outside }), /project copy inside the run folder/);
+  await assert.rejects(fixture.provider.run({ ...fixture.request(), workspace: fixture.snapshot }), /project copy inside the run folder/);
+});

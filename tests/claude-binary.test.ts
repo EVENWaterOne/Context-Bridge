@@ -1,12 +1,12 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { ClaudeProvider } from '../server/claude.ts';
-import { diagnosisOutputSchema } from '../server/validation.ts';
+import { diagnosisOutputSchema, runOutputSchema } from '../server/validation.ts';
 import type { CodexRunRequest } from '../server/provider.ts';
 
 // Runs the pinned Agent SDK's real Claude Code binary against a local stand-in for the
@@ -154,4 +154,138 @@ test('the bundled Claude Code binary fails fast on a rejected key and stops on c
   assert.equal(api.seen.length, before + 1, 'The stalled request reached the API');
   controller.abort();
   await assert.rejects(pending, (error: Error) => error.name === 'AbortError');
+});
+
+// Run mode with the real binary: one tool call per model turn, chosen by how many tool results the
+// request already carries. Needs Claude Code's OS sandbox (bubblewrap and socat on Linux, built in on
+// macOS); where it is missing the provider reports that and the job never offers tools, so the test
+// is skipped.
+type Turn = { tool: string; input: Record<string, unknown> };
+async function scriptedApi(t: TestContext, turns: Turn[]) {
+  const seen: { tools: string[]; results: { content: string; isError: boolean }[] }[] = [];
+  const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+    let raw = '';
+    request.on('data', chunk => { raw += chunk; });
+    request.on('end', () => {
+      if (request.method !== 'POST' || !request.url?.startsWith('/v1/messages') || request.url.includes('count_tokens')) { response.writeHead(404).end('{}'); return; }
+      const body = JSON.parse(raw || '{}') as { model?: string; tools?: { name: string }[]; messages?: { role: string; content: unknown }[] };
+      const results = (body.messages ?? []).flatMap(message => message.role === 'user' && Array.isArray(message.content) ? message.content.filter((block: { type?: string }) => block.type === 'tool_result') : [])
+        .map((block: { content?: unknown; is_error?: boolean }) => ({ content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content), isError: !!block.is_error }));
+      seen.push({ tools: (body.tools ?? []).map(tool => tool.name), results });
+      const turn = turns[Math.min(results.length, turns.length - 1)];
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const send = (type: string, data: Record<string, unknown>) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+      send('message_start', { message: { id: `msg_${seen.length}`, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } });
+      send('content_block_start', { index: 0, content_block: { type: 'tool_use', id: `toolu_${seen.length}`, name: turn.tool, input: {} } });
+      send('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(turn.input) } });
+      send('content_block_stop', { index: 0 });
+      send('message_delta', { delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 20 } });
+      send('message_stop', {});
+      response.end();
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+  return { seen, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+}
+
+test('run mode with the bundled Claude Code binary: commands run sandboxed in the copy, edits stay there, and secrets, the real project and the network are out of reach', { timeout: 180_000 }, async t => {
+  const probe = new ClaudeProvider({ dataDir: join(tmpdir(), 'context-bridge-unused') });
+  const access = await probe.commandAccess();
+  if (!access.available) { t.skip(access.note); return; }
+  const { provider, directory } = await setup(t);
+  const data = join(directory, 'data'), snapshot = join(data, 'runs', 'job'), workspace = join(snapshot, 'work', 'arm_project');
+  const project = join(directory, 'arm_project');
+  for (const dir of [workspace, project]) {
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'motion.py'), 'return_duration = 0.6\n');
+    await writeFile(join(dir, 'check.js'), "const m=require('fs').readFileSync('motion.py','utf8').match(/return_duration = ([0-9.]+)/);if(Number(m[1])>2){console.error('too slow '+m[1]);process.exit(1)}console.log('ok '+m[1]);");
+  }
+  const auth = join(data, 'claude', 'auth.json');
+  await readFile(auth);
+  const turns: Turn[] = [];
+  const api = await scriptedApi(t, turns);
+  // From the copy (data/runs/job/work/arm_project): ../../../.. is the data folder, ../../../../.. the test
+  // folder. The port is the mock API, which is open outside the sandbox.
+  const PROBE = [
+    "const fs=require('fs'),p=require('path');",
+    "try{fs.writeFileSync(p.resolve('../../../../../arm_project/escaped.txt'),'x');console.log('WRITE_OPEN')}catch(e){console.log('WRITE_BLOCKED',e.code)}",
+    "try{fs.readFileSync(p.resolve('../../../../claude/auth.json'));console.log('KEY_READABLE')}catch(e){console.log('KEY_BLOCKED',e.code)}",
+    "console.log(process.env.ANTHROPIC_API_KEY?'ENV_KEY_VISIBLE':'ENV_KEY_HIDDEN');",
+    `require('http').get('${api.url}/',()=>console.log('NET_OPEN')).on('error',e=>console.log('NET_BLOCKED',e.code));`,
+  ].join('');
+  const result = { outcome: 'proposal', title: 'Make the return gentler', summary: 'Return duration 0.6 s to 1.2 s.', rationale: 'node check.js passed after the edit.', evidence: ['ok 1.2'], questions: [], risk: 'Test on the arm.' };
+  turns.push(
+    { tool: 'Bash', input: { command: 'node check.js && cat motion.py', description: 'Run the check' } },
+    { tool: 'Read', input: { file_path: join(workspace, 'motion.py') } },
+    { tool: 'Edit', input: { file_path: join(workspace, 'motion.py'), old_string: 'return_duration = 0.6', new_string: 'return_duration = 1.2' } },
+    // Paths are computed inside the command, so only the OS sandbox (not Claude Code's permission check) can stop them.
+    { tool: 'Bash', input: { command: `node check.js; node -e "${PROBE}"`, description: 'Check again and probe the sandbox' } },
+    // A command naming an outside path is refused outright, or blocked by the sandbox.
+    { tool: 'Bash', input: { command: `echo escaped > ${JSON.stringify(join(project, 'escaped.txt'))}`, description: 'Write the real project' } },
+    { tool: 'Write', input: { file_path: join(project, 'new.txt'), content: 'escaped\n' } },
+    { tool: 'Read', input: { file_path: auth } },
+    { tool: 'StructuredOutput', input: result },
+  );
+  // The provider in setup() talks to the plain mock; point a second one at the scripted mock with the same data folder.
+  await provider.close();
+  const runner = new ClaudeProvider({ dataDir: data, apiBaseUrl: api.url });
+  t.after(() => runner.close());
+  const events: { type: string; text?: string; command?: { command: string; status: string; output?: string; exitCode?: number | null } }[] = [];
+  const answer = await runner.run({ prompt: 'Diagnose.', snapshotDir: snapshot, workspace, outputSchema: runOutputSchema, signal: new AbortController().signal, onEvent: event => events.push(event as never) });
+  assert.equal(JSON.parse(answer.text).title, 'Make the return gentler');
+  const [first] = api.seen;
+  assert.deepEqual(first.tools.filter(name => name !== 'DeferredToolPlaceholder').sort(), ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'StructuredOutput', 'Write']);
+  const outputs = api.seen.at(-1)!.results;
+  assert.match(outputs[0].content, /ok 0\.6[\s\S]*return_duration = 0\.6/, 'The first command really ran in the copy');
+  assert.equal(outputs[2].isError, false, 'Edit inside the copy is allowed');
+  assert.match(outputs[3].content, /ok 1\.2/, 'The second check ran on the edited copy');
+  assert.match(outputs[3].content, /WRITE_BLOCKED (EROFS|EACCES|EPERM)/, 'Writing the real project is blocked by the sandbox');
+  assert.match(outputs[3].content, /KEY_BLOCKED/, 'Saved keys in the data folder are unreadable to commands');
+  assert.match(outputs[3].content, /ENV_KEY_HIDDEN/, 'The API key is removed from commands');
+  assert.match(outputs[3].content, /NET_BLOCKED/, 'The network is blocked by the sandbox');
+  assert.equal(outputs[4].isError, true, 'A command writing the real project fails');
+  assert.equal(outputs[5].isError, true, 'Writing the real project with the file tools is refused');
+  assert.doesNotMatch(outputs[5].content, /has not been read/);
+  assert.equal(outputs[6].isError, true, 'Reading outside the copy with the file tools is refused');
+  assert.ok(!outputs.some(output => output.content.includes(KEY)), 'The key never reaches the model through a tool');
+  assert.equal(await readFile(join(workspace, 'motion.py'), 'utf8'), 'return_duration = 1.2\n');
+  assert.equal(await readFile(join(project, 'motion.py'), 'utf8'), 'return_duration = 0.6\n');
+  await assert.rejects(readFile(join(project, 'escaped.txt')));
+  await assert.rejects(readFile(join(project, 'new.txt')));
+  const commands = events.filter(event => event.type === 'command').map(event => [event.command!.command.split(';')[0], event.command!.status]);
+  assert.deepEqual(commands.slice(0, 4), [['node check.js && cat motion.py', 'running'], ['node check.js && cat motion.py', 'completed'], ['node check.js', 'running'], ['node check.js', 'completed']]);
+  assert.match(String(commands[5]?.[1]), /declined|failed/);
+  assert.ok(events.some(event => event.type === 'status' && /editing motion\.py in the project copy/.test(event.text ?? '')));
+});
+
+test('run mode with the bundled Claude Code binary: a command left running in the background stops writing to the copy when the run ends', { timeout: 120_000 }, async t => {
+  const probe = new ClaudeProvider({ dataDir: join(tmpdir(), 'context-bridge-unused') });
+  const access = await probe.commandAccess();
+  if (!access.available) { t.skip(access.note); return; }
+  const { provider, directory } = await setup(t);
+  const data = join(directory, 'data'), snapshot = join(data, 'runs', 'job'), workspace = join(snapshot, 'work', 'arm_project');
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, 'motion.py'), 'return_duration = 0.6\n');
+  const turns: Turn[] = [];
+  const api = await scriptedApi(t, turns);
+  turns.push(
+    { tool: 'Bash', input: { command: 'while true; do echo tick >> ticks.txt; sleep 0.1; done', description: 'Keep writing', run_in_background: true } },
+    { tool: 'Bash', input: { command: 'sleep 1; grep -c tick ticks.txt; grep -q nomatch ticks.txt', description: 'Count ticks' } },
+    { tool: 'StructuredOutput', input: { outcome: 'proposal', title: 'T', summary: 'S', rationale: 'R', evidence: [], questions: [], risk: 'K' } },
+  );
+  await provider.close();
+  const runner = new ClaudeProvider({ dataDir: data, apiBaseUrl: api.url });
+  t.after(() => runner.close());
+  const events: { type: string; command?: { command: string; status: string; exitCode?: number | null } }[] = [];
+  await runner.run({ prompt: 'Diagnose.', snapshotDir: snapshot, workspace, outputSchema: runOutputSchema, signal: new AbortController().signal, onEvent: event => events.push(event as never) });
+  const commands = events.filter(event => event.type === 'command').map(event => [event.command!.command.slice(0, 10), event.command!.status, event.command!.exitCode]);
+  assert.deepEqual(commands[1], ['while true', 'running', null], 'A background command is reported as still running, not as finished with exit code 0');
+  // Claude Code does not treat grep without a match (exit 1) as an error and reports no exit code, so none is claimed.
+  assert.deepEqual(commands[3], ['sleep 1; g', 'completed', null]);
+  const size = async () => (await readFile(join(workspace, 'ticks.txt'), 'utf8').catch(() => '')).length;
+  const first = await size();
+  assert.ok(first > 0, 'The background command ran');
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(await size(), first, 'Nothing writes to the copy after the run returned');
 });

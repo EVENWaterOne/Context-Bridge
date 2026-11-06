@@ -53,6 +53,8 @@
 @media(prefers-reduced-motion:reduce){.working .status-dot,.status-dot.working{animation:none}}
 .waiting.with-activity>.robot{width:300px;height:250px;margin-top:-10px}
 @media(max-width:760px){.waiting.with-activity>.robot{width:230px;height:200px}}
+.run-card .command-field{margin-top:14px}.run-card .command-field input{font-family:'IBM Plex Mono',monospace;font-size:12px}.run-card .fine{margin:10px 0 0}.run-card code,.verification-run code,.command-list code{font-family:'IBM Plex Mono',monospace;font-size:11px;overflow-wrap:anywhere}.verification-run p{margin:0 0 6px;font-size:12px}.verification-run li{margin-bottom:4px}.verification-run details,.command-list details{margin-top:4px}.verification-run summary,.command-list summary{cursor:pointer;color:var(--muted);font-size:11px}.verification-run pre,.command-list pre{margin:6px 0 0;max-height:220px;overflow:auto;background:#f1f3ed;border-radius:8px;padding:10px;font-size:10px;color:var(--ink)}.command-list{margin:8px 0 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:8px}.command-list li{display:flex;flex-direction:column;gap:2px;font-size:12px;border-left:2px solid #d3d8cc;padding-left:10px}.command-list .command-failed{border-left-color:#c58c77}.command-list .command-declined{border-left-color:#c5ad3b}.command-list small{color:var(--muted)}.commands-run ol{padding-left:0}
+.run-card .detected-command .text-button{margin-left:6px;font-size:12px;padding:0}
 
 /* Preview, execution and progression stay separate at every screen size. */
 .motion-footer>div{flex-wrap:wrap;justify-content:flex-end}

@@ -1,5 +1,6 @@
 /** Manual browser fixture. Never imported by the production service. No real inference or credentials. */
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,7 @@ import { ClaudeProvider } from '../../server/claude.ts';
 import { fakeSdk, message } from './claude-sdk.ts';
 import { createExampleWorkspace } from '../../src/lib/workflow.ts';
 import type { CodexProvider, CodexRunRequest } from '../../server/provider.ts';
+import { runShell } from '../../server/runner.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const directory = mkdtempSync(join(tmpdir(), 'context-bridge-ui-'));
@@ -15,12 +17,20 @@ const project = join(directory, 'fixture-project');
 mkdirSync(project);
 const original = 'return_duration = 0.6\r\n';
 writeFileSync(join(project, 'motion.py'), original);
+// A test script, so run mode has a build-or-test command to detect (npm test) and run before and after.
+writeFileSync(join(project, 'check.js'), "const m=require('fs').readFileSync('motion.py','utf8').match(/return_duration = ([0-9.]+)/);if(!m||Number(m[1])>2){console.error('return_duration '+(m&&m[1])+' is outside 0-2 s');process.exit(1)}console.log('ok: return_duration '+m[1]+' s');");
+writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'fixture-project', private: true, scripts: { test: 'node check.js' } }, null, 2));
 const provider: CodexProvider = {
   async status() { return { available: true, authenticated: true, version: 'UI FIXTURE (no model)', account: { type: 'fixture', email: 'UI fixture — no real inference' }, models: [{ id: 'fixture', displayName: 'Fixture model', isDefault: true }] }; },
   async login() { throw new Error('No authentication in this test-only fixture.'); },
+  sandbox() { return 'UI fixture: commands run in the project copy without a model (no real sandbox).'; },
+  // UI_FIXTURE_SANDBOX=0 shows the page when the agent cannot run commands.
+  async commandAccess() { return process.env.UI_FIXTURE_SANDBOX === '0' ? { available: false, note: 'UI fixture: no sandbox.' } : { available: true, note: 'UI fixture sandbox.' }; },
+  knownAccess() { return process.env.UI_FIXTURE_SANDBOX === '0' ? { available: false, note: 'UI fixture: no sandbox.' } : { available: true, note: 'UI fixture sandbox.' }; },
   async run(request: CodexRunRequest) {
     // Paced like a real turn so the page's progress, reasoning and streaming views can be checked by eye.
-    const wait = (ms: number) => new Promise<void>((yes, no) => { const timer = setTimeout(yes, ms); request.signal.addEventListener('abort', () => { clearTimeout(timer); no(new DOMException('Cancelled', 'AbortError')); }, { once: true }); });
+    // UI_FIXTURE_PACE=10 slows every step, for screenshots on a slow (software-rendered) browser.
+    const wait = (ms: number) => new Promise<void>((yes, no) => { const timer = setTimeout(yes, ms * Number(process.env.UI_FIXTURE_PACE || 1)); request.signal.addEventListener('abort', () => { clearTimeout(timer); no(new DOMException('Cancelled', 'AbortError')); }, { once: true }); });
     request.onEvent({ type: 'status', text: 'UI fixture: exercising the real local API and file service' });
     await wait(1200);
     request.onEvent({ type: 'status', text: 'Codex is thinking…' });
@@ -30,6 +40,19 @@ const provider: CodexProvider = {
     if (request.outputSchema && process.env.UI_FIXTURE_QUESTIONS === '1' && !/"answer": "|continue without answering/.test(request.prompt)) {
       const text = JSON.stringify({ outcome: 'needs_information', title: 'One detail decides the change', summary: 'UI fixture: BIT asks before proposing.', rationale: 'Exercise the answer flow without a model.', evidence: ['motion.py: return_duration = 0.6'], questions: ['Does the arm stop cleanly at home, or does it bounce?'], risk: 'Fixture only.', changes: [] });
       request.onEvent({ type: 'delta', text });
+      return { text, threadId: 'fixture-thread' };
+    }
+    if (request.workspace && request.outputSchema) {
+      // Run mode: really run the check in the copy and edit the copy, as an agent would.
+      for (const [id, command] of [['fixture-1', 'node check.js'], ['fixture-2', 'node check.js']]) {
+        if (id === 'fixture-2') { await writeFile(join(request.workspace, 'motion.py'), 'return_duration = 1.2\n'); request.onEvent({ type: 'status', text: 'Codex edited motion.py in the project copy' }); }
+        request.onEvent({ type: 'command', command: { id, command, status: 'running' } });
+        const ran = await runShell(command, request.workspace, request.signal, 30_000);
+        request.onEvent({ type: 'command', command: { id, command, status: ran.exitCode === 0 ? 'completed' : 'failed', exitCode: ran.exitCode, output: ran.output, durationMs: ran.durationMs } });
+        await wait(600);
+      }
+      const text = JSON.stringify({ outcome: 'proposal', title: 'Review the return duration', summary: 'UI fixture: edited the copy and ran the check before and after.', rationale: 'node check.js passed with 0.6 s and with 1.2 s.', evidence: ['ok: return_duration 0.6 s', 'ok: return_duration 1.2 s'], questions: [], risk: 'Fixture only; no real inference or hardware test.' });
+      for (let index = 0; index < text.length; index += 48) { request.onEvent({ type: 'delta', text: text.slice(index, index + 48) }); await wait(60); }
       return { text, threadId: 'fixture-thread' };
     }
     const text = request.outputSchema ? JSON.stringify({ outcome: 'proposal', title: 'Review the return duration', summary: 'UI fixture: a reversible single-file change.', rationale: 'Exercise review, explicit Apply, and Undo on an isolated test file.', evidence: ['motion.py: return_duration = 0.6'], questions: [], risk: 'Fixture only; no real inference or hardware test.', changes: [{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }] }) : 'UI fixture response: this is read-only chat. No model or hardware was called.';

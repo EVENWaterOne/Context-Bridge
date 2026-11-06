@@ -22,6 +22,33 @@ export interface FileCheck {
   status: 'passed' | 'failed' | 'skipped';
   detail?: string;
 }
+/** A command the agent ran in its copy of the project, as its provider reported it. */
+export interface CommandRun {
+  id: string;
+  command: string;
+  status: 'running' | 'completed' | 'failed' | 'declined';
+  exitCode?: number | null;
+  /** The end of the output, shortened. */
+  output?: string;
+  durationMs?: number;
+}
+/** One run of the project's verification command (a build or test command) by the local service. */
+export interface VerificationRun {
+  command: string;
+  /** Set by the user, or detected from the project files. */
+  source: 'user' | 'detected';
+  /** unavailable: the program is missing or could not start, so nothing was learned about the code. */
+  status: 'passed' | 'failed' | 'timeout' | 'unavailable';
+  exitCode?: number | null;
+  output: string;
+  durationMs: number;
+}
+export interface Verification {
+  /** On the current files, before the agent started. */
+  before?: VerificationRun;
+  /** On a fresh copy of the project with exactly the proposed changes. */
+  after?: VerificationRun;
+}
 export interface Proposal extends Suggestion {
   version: 2;
   outcome: 'proposal' | 'needs_information';
@@ -30,6 +57,28 @@ export interface Proposal extends Suggestion {
   contextHash: string;
   provider?: ProviderId;
   checks?: FileCheck[];
+  /** Run mode: commands the agent ran in its project copy (the latest ones when there were many). */
+  commands?: CommandRun[];
+  /** Run mode: how many commands the agent ran in all. */
+  commandCount?: number;
+  /** Run mode: the verification command before and after the proposed change. */
+  verification?: Verification;
+  /** Run mode: files outside the selection that the agent created or changed. They are not applied. */
+  otherEdits?: string[];
+}
+/** How a task runs code while diagnosing, with the command the service would use now. */
+export interface ExecutionInfo {
+  enabled: boolean;
+  /** The user's own verification command. */
+  command?: string;
+  /** A command detected from the project, used when the user set none. */
+  detected?: string;
+  /** What confines the agent's commands with the current provider on this computer. */
+  sandbox: string;
+  /** Whether the agent can run commands here, when known before a request (Codex on Windows sets up on first use). */
+  tools?: { available: boolean; note: string };
+  /** Whether the service has a sandbox to run the build or test command in. */
+  checker: boolean;
 }
 export interface ChatMessage {
   id: string;
@@ -54,6 +103,10 @@ export interface JobView {
   /** Reasoning summary streamed by the provider, if any. */
   reasoning?: string;
   result?: Proposal | ChatMessage;
+  /** Run mode: the latest commands the agent ran so far. */
+  commands?: CommandRun[];
+  /** Run mode: how many commands the agent ran so far. */
+  commandCount?: number;
   error?: string;
   createdAt: string;
   threadId?: string;

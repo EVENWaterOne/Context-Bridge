@@ -1,6 +1,6 @@
 import { emptyAssembly, existingArmAssembly, assembledCount, assemblyReady, type HardwareAssembly } from './assembly.ts';
 import { HARDWARE_PROFILE, JOINT_IDS, JOINTS, hardwareDescription, pendingCalibration, usesRecordedUnoCalibration, type HardwareJoint, type ServoLimits } from './hardware.ts';
-import type { FileChange, FileCheck, ProviderId } from './backend-types.ts';
+import type { CommandRun, FileChange, FileCheck, ProviderId, Verification } from './backend-types.ts';
 /** Browser-local prototype state. No passwords or external service credentials are persisted. */
 export type Stage = 'setup' | 'first-run' | 'observe' | 'request' | 'investigating' | 'review' | 'applying' | 'test' | 'feedback';
 export type Issue = 'Too fast' | 'No motion' | 'Wrong way' | 'Shaking' | 'Error message' | 'Other';
@@ -10,12 +10,14 @@ export type Phase = 'Home' | 'Reach' | 'Pause' | 'Turn' | 'Return';
 export interface Hardware { name: string; controller: string; connection: string; joints: number; gripper: boolean; notes: string; configured: boolean; profile?: string; servoCalibration?: ServoLimits; assembly?: HardwareAssembly }
 export interface ProjectFile { id: string; name: string; kind: 'code' | 'hardware' | 'log' | 'note' | 'other'; content: string; size: number; updatedAt: string; source: 'sample' | 'uploaded' | 'generated'; mimeType?: string; relativePath?: string; linked?: boolean; hash?: string; includeInContext?: boolean }
 export interface Observation { joint: Joint; issues: Issue[]; phase: Phase; detail: string; desired: string[]; includePrevious: boolean }
-export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string; version?: 2; outcome?: 'proposal' | 'needs_information'; changes?: FileChange[]; questions?: string[]; contextHash?: string; provider?: ProviderId; checks?: FileCheck[] }
+export interface Suggestion { id: string; title: string; summary: string; rationale: string; parameter: string; before: string; after: string; unit: string; fileName: string; codeBefore: string; codeAfter: string; confidence: string; evidence: string[]; steps: string[]; risk: string; version?: 2; outcome?: 'proposal' | 'needs_information'; changes?: FileChange[]; questions?: string[]; contextHash?: string; provider?: ProviderId; checks?: FileCheck[]; commands?: CommandRun[]; commandCount?: number; verification?: Verification; otherEdits?: string[] }
 /** Questions BIT asked in this round and what the user answered. The local service owns this list. */
 export interface Clarification { questions: string[]; answer?: string; askedAt?: string; answeredAt?: string }
 export interface ChangeCheckpoint { fileName:string; fileId?:string; existed:boolean; beforeContent:string; afterContent:string }
 export interface Round { id: string; number: number; observation: Observation; suggestion?: Suggestion; changeCheckpoint?: ChangeCheckpoint; applied: boolean; result?: Feedback; note?: string; createdAt: string; completedAt?: string; operationId?: string; clarifications?: Clarification[] }
-export interface Task { id: string; name: string; demoScenario?: DemoScenario; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string; rootId?: string; rootPath?: string }
+/** Run code while diagnosing: the agent works in a copy of the project, and the service runs the verification command. Owned by the local service; imports never carry it. */
+export interface ExecutionSettings { enabled: boolean; command?: string }
+export interface Task { id: string; name: string; demoScenario?: DemoScenario; hardware: Hardware; files: ProjectFile[]; rounds: Round[]; activeRoundId: string; createdAt: string; rootId?: string; rootPath?: string; execution?: ExecutionSettings }
 export interface Workspace { version: 1; tasks: Task[]; activeTaskId: string; stage: Stage }
 export interface StorageLike { getItem(key: string): string | null; setItem(key: string, value: string): void }
 export const STORAGE_KEY = 'context-bridge.workspace.v1';

@@ -8,9 +8,11 @@ import { conflict, invalid } from './errors.ts';
 import { contextHash } from './context.ts';
 
 const MAX_FILE = 1024 * 1024;
-const ignored = new Set(['.git','.codex','.data','.ssh','.aws','.gnupg','node_modules','dist','build','.next','.render-cache','coverage','.venv','venv']);
+/** Folders never listed, copied or written: version control, credentials, dependencies and build output. */
+export const ignored = new Set(['.git','.codex','.data','.ssh','.aws','.gnupg','node_modules','dist','build','.next','.render-cache','coverage','.venv','venv']);
 const allowed = /\.(py|js|mjs|cjs|ts|tsx|jsx|ino|cpp|hpp|h|c|json|log|csv|txt|md|css|html|yaml|yml)$/i;
-const secret = /^(\.env(?:\..*)?|auth\.json|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa.*|id_ed25519.*)$/i;
+/** Files that may hold credentials. They are never listed, read or copied. */
+export const secret = /^(\.env(?:\..*)?|auth\.json|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa.*|id_ed25519.*)$/i;
 const timestamp = () => new Date().toISOString();
 
 export function safeRelative(value: string): string {
