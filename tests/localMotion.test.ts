@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createTask,createInitialWorkspace,updateHardware,completeHardwareSetup,getActiveTask,getActiveRound,makeFile,updateRound,upsertFiles,reviseObservation,applyRoundChange,createExampleWorkspace,readMotionSettings,illustratedMotion,excludeDemoGeneratedFiles,prepareAgentRequest,prepareDemoScenario,DEFAULT_RETURN_DURATION} from '../src/lib/workflow.ts';
 import {emptyAssembly} from '../src/lib/assembly.ts';
 import {JOINT_IDS} from '../src/lib/hardware.ts';
-import {buildSuggestion} from '../src/lib/agent.ts';
+import {buildSuggestion,mockAgent} from '../src/lib/agent.ts';
 import {validateWorkspace} from '../server/validation.ts';
 
 function configured(){
@@ -72,6 +72,15 @@ test('legacy apply appends only a missing motion_easing line and refuses a contr
   state=updateRound(state,{suggestion:buildSuggestion({task:getActiveTask(state),round:getActiveRound(state)})});
   assert.equal(getActiveRound(state).suggestion!.parameter,'serial_timeout');
   assert.throws(()=>applyRoundChange(state),/source changed/);
+});
+
+test('the demo diagnosis refuses a change it could not apply, instead of proposing one that Apply then rejects',async()=>{
+  const ask=(issues:string[])=>{const state=reviseObservation(createExampleWorkspace(),{issues});return mockAgent.investigate({task:getActiveTask(state),round:getActiveRound(state)},{durationMs:0})};
+  // The example motion.py has no serial_timeout line.
+  await assert.rejects(ask(['Error message']),/has no serial_timeout setting/);
+  // A missing motion_easing line is the one exception Apply accepts.
+  assert.equal((await ask(['Shaking'])).parameter,'motion_easing');
+  assert.equal((await ask(['Too fast'])).parameter,'return_duration');
 });
 
 test('an old browser workspace is imported with the demo files unchecked and the user files as they were',()=>{

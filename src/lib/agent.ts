@@ -67,8 +67,12 @@ export const mockAgent: AgentAdapter = {
     // The demo diagnosis reads the same files the request viewer shows.
     const request = buildAgentRequest(context);
     if (!request.task.files.some(file => file.kind === 'code')) throw new Error('No code file is checked in the context folder. Check one, or add the example project files, then send again.');
+    const suggestion = buildSuggestion({ task: request.task, round: context.round });
+    // Only a missing motion_easing line may be added on Apply; any other missing setting would be refused there.
+    const target = request.task.files.find(file => file.name === suggestion.fileName);
+    if (suggestion.parameter !== 'motion_easing' && (!target || !motionAssignment(target.content, suggestion.parameter))) throw new Error(`${suggestion.fileName} has no ${suggestion.parameter} setting, so this demo has no change to propose for that observation. Choose another observation, or add the setting to the file and send again.`);
     await progress(context.round.observation.issues.includes('Shaking')?['Opening the observation and motion files', 'Checking the lift, turn and settling sequence', 'Comparing the current easing profile', 'Preparing a steadier motion proposal']:['Opening the context folder', 'Checking hardware and motion code', 'Comparing the relevant rounds', 'Preparing one focused change'], options, 9600);
-    return buildSuggestion({ task: request.task, round: context.round });
+    return suggestion;
   },
   async applySuggestion(context, options = {}) {
     const suggestion = context.round.suggestion;

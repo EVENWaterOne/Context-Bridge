@@ -45,7 +45,7 @@ The service listens only on `127.0.0.1`, with localhost Host/Origin checks and a
 
 ## Motion filming scenarios (browser demo only)
 
-This section applies only to the browser demonstration (`npm run dev:demo`, or the Vercel build). The local application has no Motion examples, no Run button and no generated motion files. Its requests contain only the files you selected and the structured observation, and its arm animation is one fixed illustrative reference that does not follow your code, your observation or an applied change.
+This section applies only to the browser demonstration (`npm run dev:demo`, or the Vercel build). The local application has no Motion examples, no Run button and no generated motion files. Its requests carry the files you checked, your hardware setup, the structured observation and your answers to BIT's questions (plus earlier rounds if you include them), never the demo's generated files, and its arm animation is one fixed illustrative reference that does not follow your code, your observation or an applied change.
 
 In the demo, open the task sidebar → **Motion examples**. Each option creates a fresh task without replacing existing projects:
 
