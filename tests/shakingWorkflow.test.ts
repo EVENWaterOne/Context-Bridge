@@ -116,6 +116,19 @@ test('the exact HTTP request respects the history switch and keeps explicitly up
   await createHttpAgent('/api/agent',transport).investigate(input);
 });
 
+test('a file unchecked in the context folder is left out of the exact request and the demo diagnosis',async()=>{
+  const uncheck=(state:ReturnType<typeof shaking>,pick:(f:ReturnType<typeof getActiveTask>['files'][number])=>boolean)=>updateTask(state,{files:getActiveTask(state).files.map(f=>pick(f)?{...f,includeInContext:false}:f)});
+  const state=uncheck(shaking(),f=>f.name==='motion-reference.json'),payload=buildAgentRequest(context(state));
+  assert.equal(payload.task.files.some(f=>f.name==='motion-reference.json'),false);
+  assert.deepEqual(payload.task.files.map(f=>f.name),getActiveTask(state).files.filter(f=>f.name!=='motion-reference.json').map(f=>f.name));
+  const transport=(async (_url:string|URL|Request,init?:RequestInit)=>{assert.equal(JSON.parse(String(init?.body)).task.files.some((f:{name:string})=>f.name==='motion-reference.json'),false);return new Response(JSON.stringify(buildSuggestion(context(state))));}) as typeof fetch;
+  await createHttpAgent('/api/agent',transport).investigate(context(state));
+  assert.equal((await mockAgent.investigate(context(state),{durationMs:0})).parameter,'motion_easing');
+  const noCode=uncheck(state,f=>f.kind==='code');
+  assert.equal(buildAgentRequest(context(noCode)).task.files.some(f=>f.kind==='code'),false);
+  await assert.rejects(mockAgent.investigate(context(noCode),{durationMs:0}),/No code file is checked/);
+});
+
 test('reload retires only unapplied legacy shaking suggestions, including inactive tasks',()=>{
   let original=reviseObservation(createExampleWorkspace(),{issues:['Shaking'],desired:['Smoother motion']});
   const legacy={...buildSuggestion(context(original)),parameter:'step_interval',before:'0.02',after:'0.04',unit:'s',codeBefore:'step_interval = 0.02',codeAfter:'step_interval = 0.04'};

@@ -47,7 +47,7 @@
 ## 旧数据、取消与恢复
 
 - 线上 Vercel 与 localhost 属于不同网站，浏览器不能跨域直接读取旧 localStorage。在原页面 Export task，在本机工作台账户菜单选择 Import task JSON。
-- 同一 localhost 来源曾保存的旧浏览器工作区，可以通过 Import old browser workspace 一次导入。导入有来源标识，重复导入同一来源不会再建副本；旧历史不会触发文件写入。
+- 同一 localhost 来源曾保存的旧浏览器工作区，可以通过 Import old browser workspace 一次导入。导入有来源标识，重复导入同一来源不会再建副本；旧历史不会触发文件写入。浏览器演示自己生成的 `motion.py`、`motion-reference.json` 和 `round-NN-observation.md` 导入后不勾选，不会发给 AI，除非你在上下文文件夹里重新勾选。
 - SQLite 是本机版唯一持久化来源。多个浏览器同时修改时使用 revision 检查；发生冲突会加载服务端版本，并保留可下载的未保存草稿，避免静默覆盖。
 - 页面刷新会重新连接仍在运行的任务。Stop/Cancel 会中断实际的 Codex turn 或 Claude Code 子进程；Codex 不回应时有结束子进程的限时兜底。单次服务端请求默认最多五分钟，同一时间只接受一个模型任务。
 - 服务重启会将未完成任务标成 interrupted，允许重新提交。多文件写入使用持久化操作日志；启动时回滚中断操作，不把 SQLite 事务误当成多文件原子事务。
