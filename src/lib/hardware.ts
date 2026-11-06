@@ -45,9 +45,9 @@ const CONTROLLER_PROFILES: Partial<Record<string, { board: string; mcu: string; 
 };
 const UNO_ARM_CALIBRATION: ServoLimits = {
   J1: { min: 10, max: 170, zero: 90, direction: 1 }, J2: { min: 120, max: 180, zero: 145, direction: 1 },
-  J3: { min: 30, max: 150, zero: 100, direction: 1 }, J4: { min: 98, max: 170, zero: 98, direction: 1 },
+  J3: { min: 68, max: 150, zero: 100, direction: 1 }, J4: { min: 98, max: 170, zero: 98, direction: 1 },
 };
-/** The owner's arm driven by the Uno sketch, recorded 2026-10-30. The owner judged each held angle by eye;
+/** The owner's arm driven by the Uno sketch, recorded 2026-10-30, joint limits updated 2026-11-06. The owner judged each held angle by eye;
  * nothing was measured with an instrument. Angles are the sketch's command angles and do not carry over to other firmware. */
 export const MEASURED_UNO_ARM = {
   recorded: '2026-10-30', firmware: 'ARDUINO_UNO_ARM_V4', sketch: 'Arduino_Uno_Arm_Test/Arduino_Uno_Arm_Test.ino',
@@ -57,9 +57,10 @@ export const MEASURED_UNO_ARM = {
   directionConvention: 'direction 1: a positive relative command increases the sketch angle. increasingAngle gives what that does on the arm.',
   home: { J1: '90°: base faces straight ahead', J2: '145°: upper arm vertical (140° leans slightly back, 150° slightly forward)', J3: '100°: forearm a little below level (137° is level)', J4: '98°: jaws closed without the servo buzzing' },
   increasingAngle: { J1: 'Not recorded', J2: 'Upper arm tilts forward', J3: 'Forearm raises the gripper', J4: 'Jaws open' },
-  limitSource: { J1: 'Copied from the original ESP32 firmware; ends of travel not tested on this arm', J2: 'Copied from the original ESP32 firmware; ends of travel not tested on this arm', J3: 'Copied from the original ESP32 firmware; ends of travel not tested on this arm', J4: 'Observed: 98° is the lowest angle that closes without buzzing; 170° is open' },
+  limitSource: { J1: 'Tested by hand 2026-11-06, judged by eye: the base turns 0–180°; 10–170° keeps a margin', J2: 'Tested by hand 2026-11-02 and 2026-11-06, judged by eye: about 120° is the lowest with the forearm at 95° or above; 115° with the forearm at 100° hits the forearm; 180° is fine with the forearm at 100°', J3: 'Tested by hand 2026-11-06, judged by eye: about 68° is the lowest with the upper arm at 140°. The 150° maximum is from the original ESP32 firmware; 145° was reached with the upper arm at 145°', J4: 'Observed: 98° is the lowest angle that closes without buzzing; 170° is open' },
   originalFirmwareHome: { J1: 90, J2: 140, J3: 90, J4: 0 },
   notes: [
+    'Upper arm and forearm limit each other. The lowest safe forearm angle is about 95° with the upper arm at 120° and about 68° with the upper arm at 140°. Only those two points were tested: the line between them is an estimate, and above 140° the upper arm was not checked at low forearm angles, so the 68° floor there is untested. The Debug, Show, Pick, Pick_Rough and OneByOne sketches use forearm >= 98 - 1.35 × (upper arm - 120) with a floor of 68°, a 3° margin on that line; Debug skips the check under free 1 and assumes the worst case for an arm with no angle yet. Arduino_Uno_Arm_Test and Arduino_Uno_Arm_Reach_Alone do not have this rule.',
     'Gripper: at 95° and below the jaws clamp and the servo buzzes (stall). 170° is open; 180° looks about the same as 170°. The original firmware used 0–80° for the gripper, and 0° stalls it.',
     'The sketch makes servo pulses with Timer1 compare interrupts (no Servo library), mapping 0–180° to 500–2500 µs, the same map as the ESP32 firmware.',
     'Reach / retract copies the original firmware robot_add / robot_back. robot_back uses strict comparisons, so the shoulder does not follow on the step where the forearm lands exactly on 90°: one reach-and-retract across 90° leaves the shoulder 3° higher. The V4 full sequence starts the forearm at 100° and does not cross 90°.',
@@ -88,7 +89,7 @@ export function hardwareDescription(controller = 'ESP32') {
     axes: JOINTS, servoCalibration: pendingCalibration(),
     specification: { homeSizeCm: [18,9.5,18], maximumExtendedLengthCm: 25, weightG: 160, clawOpeningClaimDeg: 180 },
     calibrationNote: measuredArm
-      ? 'measuredArm records the owner\'s arm on the Uno sketch ARDUINO_UNO_ARM_V4 (2026-10-30): home angles, the gripper range and what a larger angle does (not recorded for the base) were judged by eye, not measured with an instrument; base, shoulder and forearm limits are the original ESP32 firmware\'s, not tested ends of travel. servoCalibration holds only limits entered in setup. The claw opening claim is not a servo travel calibration. Preview proportions and poses are illustrative.'
+      ? 'measuredArm records the owner\'s arm on the Uno sketch ARDUINO_UNO_ARM_V4 (2026-10-30, joint limits updated 2026-11-06): home angles, joint limits and what a larger angle does (not recorded for the base) were judged by eye, not measured with an instrument; limitSource says where each limit came from. servoCalibration holds only limits entered in setup. The claw opening claim is not a servo travel calibration. Preview proportions and poses are illustrative.'
       : 'Per-servo min/max, zero and direction were not supplied for this controller. Angles recorded on the Arduino Uno sketch do not carry over to other firmware. The claw opening claim is not a servo travel calibration. Preview proportions and poses are illustrative.',
   };
 }

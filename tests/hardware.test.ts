@@ -65,9 +65,9 @@ test('choosing Arduino Uno puts its board facts and the recorded arm in the gene
  assert.equal(context.controller,'Arduino Uno');assert.equal(context.controllerProfile.mcu,'ATmega328P');assert.equal(context.controllerProfile.fqbn,'arduino:avr:uno');
  assert.match(context.controllerProfile.pins.serial,/D0.*D1/);assert.deepEqual(context.servoCalibration,pendingCalibration());
  const arm=context.measuredArm;assert.equal(arm.firmware,'ARDUINO_UNO_ARM_V4');assert.equal(arm.recorded,'2026-10-30');assert.deepEqual(arm.pins,{J1:'D9',J2:'D10',J3:'D11',J4:'D12'});
- assert.deepEqual(arm.calibration,{J1:{min:10,max:170,zero:90,direction:1},J2:{min:120,max:180,zero:145,direction:1},J3:{min:30,max:150,zero:100,direction:1},J4:{min:98,max:170,zero:98,direction:1}});
+ assert.deepEqual(arm.calibration,{J1:{min:10,max:170,zero:90,direction:1},J2:{min:120,max:180,zero:145,direction:1},J3:{min:68,max:150,zero:100,direction:1},J4:{min:98,max:170,zero:98,direction:1}});
  assert.deepEqual(arm.originalFirmwareHome,{J1:90,J2:140,J3:90,J4:0});assert.equal(arm.increasingAngle.J1,'Not recorded');
- assert.match(arm.method,/by eye/);assert.match(arm.limitSource.J1,/original ESP32 firmware/);assert.match(context.calibrationNote,/measuredArm/);
+ assert.match(arm.method,/by eye/);assert.match(arm.limitSource.J1,/judged by eye/);assert.match(arm.notes[0],/limit each other/);assert.match(context.calibrationNote,/measuredArm/);
  near(servoCommand('J2',0,MEASURED_UNO_ARM.calibration),145);near(servoCommand('J4',-20,MEASURED_UNO_ARM.calibration),98);near(servoCommand('J4',90,MEASURED_UNO_ARM.calibration),170);
  assert.equal(hardwareDescription('ESP32').controllerProfile,undefined);assert.equal(hardwareDescription('ESP32').measuredArm,undefined);assert.match(hardwareDescription('ESP32').calibrationNote,/not supplied/);
  const esp32=JSON.parse(getActiveTask(updateHardware(createExampleWorkspace(),{controller:'ESP32'})).files.find(f=>f.name==='hardware.json')!.content);
