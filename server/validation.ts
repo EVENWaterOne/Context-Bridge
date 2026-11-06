@@ -11,7 +11,7 @@ const file = z.object({
 });
 const observation = z.object({
   joint: z.enum(['J1','J2','J3','J4']), issues: z.array(z.enum(['Too fast','No motion','Wrong way','Shaking','Error message','Other'])).max(6),
-  phase: z.enum(['Home','Reach','Pause','Return']), detail: z.string().max(50000), desired: z.array(short).max(30), includePrevious: z.boolean(),
+  phase: z.enum(['Home','Reach','Pause','Turn','Return']), detail: z.string().max(50000), desired: z.array(short).max(30), includePrevious: z.boolean(),
 });
 const round = z.object({
   id: short.min(1), number: z.number().int().positive(), observation, applied: z.boolean(),
