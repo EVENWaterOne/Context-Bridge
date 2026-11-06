@@ -158,12 +158,12 @@ test('a later round uses the current parameter and never proposes an unchanged v
   const state = observed(), task = getActiveTask(state), round = getActiveRound(state);
   const code = task.files.find(file => file.kind === 'code')!;
   round.observation.issues = ['Shaking'];
-  code.content = 'step_interval = 0.04\n';
+  code.content = 'motion_easing = "linear"\n';
   const suggestion = buildSuggestion({ task, round });
-  assert.equal(suggestion.before, '0.04');
-  assert.equal(suggestion.after, '0.08');
-  code.content = 'step_interval = 0.20\n';
-  assert.throws(() => buildSuggestion({ task, round }), /already at its suggested setting/);
+  assert.equal(suggestion.before, 'linear');
+  assert.equal(suggestion.after, 'minimum_jerk');
+  code.content = 'motion_easing = "minimum_jerk"\n';
+  assert.throws(() => buildSuggestion({ task, round }), /already uses minimum-jerk/);
   round.observation.issues = ['Wrong way'];
   code.content = 'servo_direction = -1\n';
   assert.equal(buildSuggestion({ task, round }).after, '1');

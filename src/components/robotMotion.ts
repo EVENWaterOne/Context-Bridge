@@ -3,7 +3,7 @@ export interface Pose { x: number; y: number; open: number; phase: string }
 type Key = readonly [time: number, x: number, y: number, open: number];
 export const BUILD_DURATION = 12;
 export const INSPECT_DURATION = 10;
-export const ARM_DURATION = 7.2;
+export const ARM_DURATION = 9.566667;
 export const smooth = (t: number) => { const k = Math.max(0, Math.min(1, t)); return k * k * k * (k * (k * 6 - 15) + 10); };
 export const mix = (a: number, b: number, t: number) => a + (b - a) * t;
 /** Zero velocity and acceleration at the waypoints keeps grip/release deliberate. */

@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { createHardwareArmModel } from './HardwareArm.ts';
+import type { ArmMotionConfig } from './hardwareKinematics.ts';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { BUILD_DURATION, motionPose, smooth, solveArm, waitingMotion, type MotionMode } from './robotMotion.ts';
 
 export interface JointAnchor { x: number; y: number }
-export interface RobotScene { render(seconds: number, activeJoint: string, assembledParts?:number): void; dispose(): void; phase: string; jointAnchors: JointAnchor[] }
+export interface RobotScene { render(seconds: number, activeJoint: string, assembledParts?:number, armMotion?:ArmMotionConfig): void; dispose(): void; phase: string; jointAnchors: JointAnchor[] }
 type Material = THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
 const palette = ['#a349f4', '#00bfd1', '#f1c82d', '#ff7138'];
 const hex = [[.7, 1.05], [-.7, 1.05], [-1.36, 0], [-.7, -1.05], [.7, -1.05], [1.36, 0]];
@@ -180,7 +181,7 @@ function poseArm(rig: ArmRig, x: number, y: number, open: number, wristTilt = 0,
   rig.fingers[0].rotation.z=-.58*open;rig.fingers[1].rotation.z=.58*open;
 }
 
-export function createRobotModel(mode: MotionMode): ReturnType<typeof createMascotModel> & {setAssembly?:(count:number)=>void} {
+export function createRobotModel(mode: MotionMode): ReturnType<typeof createMascotModel> & {setAssembly?:(count:number)=>void; update:(seconds:number,activeJoint:string,armMotion?:ArmMotionConfig)=>void} {
   return mode === 'arm' ? createHardwareArmModel() : createMascotModel(mode);
 }
 
@@ -343,14 +344,14 @@ export function createRobotScene(host: HTMLElement, mode: MotionMode, assembledP
   const environment = new RoomEnvironment(), pmrem = new THREE.PMREMGenerator(renderer), envMap = pmrem.fromScene(environment, .04);
   model.scene.environment = envMap.texture; model.scene.environmentIntensity = .6;
   environment.dispose(); pmrem.dispose();
-  let currentSeconds=0,currentJoint='J2';
-  const resize = () => { const width = Math.max(1, host.clientWidth), height = Math.max(1, host.clientHeight); model.setAspect(width / height);model.update(currentSeconds,currentJoint); renderer.setSize(width, height, false); renderer.render(model.scene, model.camera); };
+  let currentSeconds=0,currentJoint='J2',currentArmMotion:ArmMotionConfig|undefined;
+  const resize = () => { const width = Math.max(1, host.clientWidth), height = Math.max(1, host.clientHeight); model.setAspect(width / height);model.update(currentSeconds,currentJoint,currentArmMotion); renderer.setSize(width, height, false); renderer.render(model.scene, model.camera); };
   const sizeObserver = new ResizeObserver(resize); sizeObserver.observe(host); resize();
   let disposed = false;
   return {
     get phase() { return model.phase; },
     get jointAnchors() { return model.jointAnchors; },
-    render(seconds, activeJoint, assembledParts=4) { if (disposed) return;model.setAssembly?.(assembledParts);currentSeconds=seconds;currentJoint=activeJoint; model.update(seconds, activeJoint); renderer.render(model.scene, model.camera); },
+    render(seconds, activeJoint, assembledParts=4,armMotion) { if (disposed) return;model.setAssembly?.(assembledParts);currentSeconds=seconds;currentJoint=activeJoint;currentArmMotion=armMotion; model.update(seconds, activeJoint,armMotion); renderer.render(model.scene, model.camera); },
     dispose() { disposed = true; sizeObserver.disconnect(); model.dispose(); envMap.dispose(); renderer.dispose(); renderer.forceContextLoss(); renderer.domElement.remove(); },
   };
 }

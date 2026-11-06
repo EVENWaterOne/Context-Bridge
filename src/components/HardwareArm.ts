@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
-import { ARM_DIMENSIONS, hardwareMotion, linkagePose, type PlanarPoint } from './hardwareKinematics.ts';
+import { ARM_DIMENSIONS, hardwareMotion, armMotionPhase, linkagePose, type PlanarPoint, type ArmMotionConfig } from './hardwareKinematics.ts';
 import { JOINT_IDS } from '../lib/hardware.ts';
 
 /** The owner's four-SG90 linkage arm. BIT's decorative arm is a separate rig. */
@@ -133,8 +133,9 @@ export function createHardwareArmModel(assembledParts=4) {
   };
   const setAssembly=(count:number)=>{scene.traverse(object=>{if(object instanceof THREE.Mesh)object.visible=object.userData.assemblyStage<=Math.max(0,Math.min(4,count));});};
   const state={scene,camera,setAspect,setAssembly,jointAnchors:JOINT_IDS.map(()=>({x:0,y:0})),phase:'Illustrative motion · calibration pending',
-    update(seconds:number,activeJoint:string){
-      const k=linkagePose(hardwareMotion(seconds));turntable.rotation.y=k.pose.yaw*Math.PI/180;
+    update(seconds:number,activeJoint:string,armMotion?:ArmMotionConfig){
+      state.phase=armMotionPhase(seconds,armMotion);
+      const k=linkagePose(hardwareMotion(seconds,armMotion));turntable.rotation.y=k.pose.yaw*Math.PI/180;
       for(const r of rods){
         const a=k[r.from] as PlanarPoint,b=k[r.to] as PlanarPoint;
         r.object.position.x=a.x;r.object.position.y=a.y;r.object.rotation.z=Math.atan2(b.y-a.y,b.x-a.x);
