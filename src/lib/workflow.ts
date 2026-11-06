@@ -275,6 +275,19 @@ export function readMotionSettings(task:Task,round:Round,version:'reference'|'cu
   const shaky=version!=='reference'&&round.observation.issues.includes('Shaking')&&(easing?easing==='linear':!(round.applied&&version==='current'));
   return {variant:shaky?'shaking':'stable',returnDuration:Number.isFinite(duration)&&duration>0?Math.min(8,Math.max(.3,duration)):DEFAULT_RETURN_DURATION};
 }
+/** What the arm illustration plays. The demo animates its own example files. The local app cannot see the physical
+ * result, so it plays one fixed stable reference that never follows the user's code, observation or an applied change. */
+export function illustratedMotion(task:Task,round:Round,mode:string,version:'reference'|'current'='current'):MotionSettings {
+  return mode==='demo'?readMotionSettings(task,round,version):{variant:'stable',returnDuration:DEFAULT_RETURN_DURATION};
+}
+/** Files the browser demo writes for itself. They describe the demo, not the user's project. */
+export function isDemoGeneratedFile(file:ProjectFile):boolean {
+  return file.source==='generated'&&(file.name===REFERENCE_FILE||/^round-\d+-observation\.md$/.test(file.name)||(file.kind==='code'&&file.name==='motion.py'));
+}
+/** An old browser workspace can hold demo files. They are imported unchecked, so no provider sees them unless the user selects them. */
+export function excludeDemoGeneratedFiles(state:Workspace):Workspace {
+  return {...state,tasks:state.tasks.map(task=>({...task,files:task.files.map(file=>isDemoGeneratedFile(file)?{...file,includeInContext:false}:file)}))};
+}
 
 function isObject(v: unknown): v is Record<string, unknown> { return !!v && typeof v === 'object'; }
 function isValidWorkspace(value: unknown): value is Workspace {
