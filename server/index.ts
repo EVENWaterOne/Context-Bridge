@@ -9,9 +9,12 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('BRI
 const defaultProvider = process.env.BRIDGE_PROVIDER?.trim().toLowerCase() || undefined;
 if (defaultProvider !== undefined && !isProviderId(defaultProvider)) throw new Error('BRIDGE_PROVIDER must be codex or claude.');
 const allowLocalLogin = process.env.BRIDGE_CLAUDE_LOCAL_LOGIN === '1';
+const optional = (name: string) => process.env[name]?.trim() || undefined;
 const app = await createApp({
   dataDir: resolve(process.env.BRIDGE_DATA_DIR ?? resolve(root, '.data')), staticDir: resolve(root, 'dist'), defaultProvider,
   claude: { apiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined, allowLocalLogin },
+  // Upload and serial: arduino-cli path, its config file, the board's port and its FQBN. All optional.
+  arduino: { cli: optional('BRIDGE_ARDUINO_CLI'), config: optional('BRIDGE_ARDUINO_CONFIG'), port: optional('BRIDGE_ARDUINO_PORT'), fqbn: optional('BRIDGE_ARDUINO_FQBN') },
 });
 await app.listen({ host: '127.0.0.1', port });
 process.stdout.write(`Context Bridge: http://localhost:${port}\nLocal files and model credentials stay in the local data directory.\n`);

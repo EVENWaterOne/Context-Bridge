@@ -1,7 +1,8 @@
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import type { ServerResponse } from 'node:http';
+import { basename, resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { CodexProvider } from './provider.ts';
 import type { ProviderId } from '../src/lib/backend-types.ts';
@@ -11,6 +12,7 @@ import { Store } from './store.ts';
 import { FileService } from './files.ts';
 import { Jobs } from './jobs.ts';
 import { BridgeError, conflict, invalid, missing } from './errors.ts';
+import { ArduinoService, type ArduinoEvent, type ArduinoOptions } from './arduino.ts';
 
 export interface AppOptions {
   dataDir: string;
@@ -25,6 +27,8 @@ export interface AppOptions {
   staticDir?: string;
   fileFault?: (phase: 'after-write', index: number) => void;
   timeoutMs?: number;
+  /** Upload and serial settings for an Arduino board (BRIDGE_ARDUINO_*). Tests inject a process factory. */
+  arduino?: ArduinoOptions;
 }
 export async function createApp(options: AppOptions) {
   const dataDir = resolve(options.dataDir);
@@ -41,9 +45,10 @@ export async function createApp(options: AppOptions) {
   const saved = store.preference('provider');
   const provider = new ProviderSwitch(factories, isProviderId(saved) ? saved : options.defaultProvider ?? 'codex');
   const jobs = new Jobs(store, files, provider, dataDir, options.timeoutMs);
+  const arduino = new ArduinoService(options.arduino);
   const app = Fastify({ bodyLimit: 16 * 1024 * 1024, logger: false });
   const session = randomBytes(32).toString('hex');
-  app.decorate('bridge', { store, files, jobs, provider });
+  app.decorate('bridge', { store, files, jobs, provider, arduino });
   app.addHook('onRequest', async (request, reply) => {
     reply.header('X-Content-Type-Options', 'nosniff').header('Referrer-Policy', 'no-referrer').header('X-Frame-Options', 'DENY');
     const host = request.headers.host ?? '';
@@ -160,6 +165,43 @@ export async function createApp(options: AppOptions) {
     return files.apply(str(b.taskId,'taskId'), str(b.roundId,'roundId'), str(b.suggestionId,'suggestionId'), str(b.idempotencyKey,'idempotencyKey',300));
   });
   app.post('/api/operations/:id/undo', async request => files.undo(params(request.params).id, str(body(request.body).idempotencyKey,'idempotencyKey',300)));
+
+  // Arduino upload and serial connection. Only the folder the task linked through the project picker is
+  // compiled, and only when the task's controller is an Arduino board.
+  const sketchFolder = (taskId: string): string => {
+    const task = store.task(taskId);
+    if (!/arduino/i.test(task.hardware.controller)) throw invalid('Upload to the board is available when the task\'s controller is an Arduino board.');
+    if (!task.rootId) throw invalid('Link the sketch folder to this task first.');
+    const root = store.root(task.rootId, task.id).path;
+    if (realpathSync(root) !== root || !lstatSync(root).isDirectory()) throw conflict('The linked folder moved or was replaced. Link it again.');
+    const sketch = `${basename(root)}.ino`, ino = join(root, sketch);
+    if (!existsSync(ino) || !lstatSync(ino).isFile()) throw invalid(`arduino-cli needs ${sketch} in the linked folder: the main sketch file must have the folder's name.`);
+    return root;
+  };
+  app.get('/api/arduino/status', async () => arduino.status());
+  app.post('/api/arduino/upload', async (request, reply) => reply.code(202).send(await arduino.upload(str(body(request.body).taskId, 'taskId'), sketchFolder(str(body(request.body).taskId, 'taskId')))));
+  app.post('/api/arduino/upload/cancel', async () => arduino.cancelUpload());
+  app.post('/api/arduino/serial/open', async () => arduino.openSerial());
+  app.post('/api/arduino/serial/close', async () => arduino.closeSerial());
+  app.post('/api/arduino/serial/send', async request => arduino.send(body(request.body).text));
+  const streams = new Set<ServerResponse>();
+  app.get('/api/arduino/events', async (_request, reply) => {
+    const initial = arduino.status();
+    reply.hijack();
+    reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no', 'X-Content-Type-Options':'nosniff' });
+    const send = (event: ArduinoEvent) => {
+      if (reply.raw.destroyed || reply.raw.writableEnded) return;
+      reply.raw.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    };
+    const cleanup = () => { clearInterval(heartbeat); arduino.events.off('event', send); streams.delete(reply.raw); };
+    const heartbeat = setInterval(() => { if (!reply.raw.destroyed) reply.raw.write(': heartbeat\n\n'); }, 15000);
+    heartbeat.unref();
+    streams.add(reply.raw);
+    arduino.events.on('event', send);
+    reply.raw.on('close', cleanup);
+    send({ type: 'status', status: initial });
+  });
+
   const staticDir = options.staticDir && resolve(options.staticDir);
   if (staticDir && existsSync(join(staticDir, 'index.html'))) {
     await app.register(fastifyStatic, { root: staticDir, wildcard: false });
@@ -172,7 +214,11 @@ export async function createApp(options: AppOptions) {
   }
   // Interrupt jobs before draining HTTP connections so an open SSE response
   // cannot hold shutdown open until the model timeout.
-  app.addHook('preClose', async () => { await jobs.close(); });
+  app.addHook('preClose', async () => {
+    // The Arduino event stream never ends by itself; end it so shutdown does not wait on it.
+    for (const stream of streams) if (!stream.writableEnded) stream.end();
+    await Promise.all([jobs.close(), arduino.close()]);
+  });
   app.addHook('onClose', async () => { store.close(); });
-  return app as typeof app & { bridge: { store: Store; files: FileService; jobs: Jobs; provider: ProviderSwitch } };
+  return app as typeof app & { bridge: { store: Store; files: FileService; jobs: Jobs; provider: ProviderSwitch; arduino: ArduinoService } };
 }

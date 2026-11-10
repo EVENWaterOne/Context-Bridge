@@ -12,6 +12,8 @@
 
 默认数据位于项目 `.data/`：`bridge.sqlite` 保存任务、操作记录和 provider 选择，`codex/` 是独立 Codex home，`claude/` 保存 Claude Code 的 API key（`auth.json`）与独立配置目录，`runs/` 是送给模型的已选上下文快照。该目录已被 Git 忽略，包含原始文件、备份及凭证，应留在自己的电脑上。可用进程环境 `BRIDGE_DATA_DIR` 指定其他绝对路径。`BRIDGE_PORT` 可改变正式服务端口；开发代理默认仍使用 4173。
 
+Arm 面板（上传和串口）的设置也来自进程环境，全部可选：`BRIDGE_ARDUINO_CLI` 是 arduino-cli 可执行文件（未设置时在 PATH 和 Arduino IDE 2 的安装目录里找）；`BRIDGE_ARDUINO_CONFIG` 是 arduino-cli 的 `--config-file`（未设置且 `~/.arduinoIDE/arduino-cli.yaml` 存在时用它，这样能找到 IDE 装好的开发板包）；`BRIDGE_ARDUINO_PORT` 是串口（未设置时用 `arduino-cli board list` 找唯一一块该型号的板）；`BRIDGE_ARDUINO_FQBN` 默认 `arduino:avr:uno`。
+
 ## 连接 Claude Code
 
 - **官方方式是 Anthropic API key。** 在 [Claude Console](https://console.anthropic.com/settings/keys) 创建 API key，在 Connect Claude Code 里粘贴并 Save key；或者启动服务前设置 `ANTHROPIC_API_KEY`。页面保存的 key 优先于环境变量。key 只发送到本机服务，以原子写入保存在 `.data/claude/auth.json`（macOS、Linux 上为 0600 仅所有者可读；Windows 上沿用数据目录的权限，请把数据目录放在自己的用户目录下），之后只显示 `sk-ant-…abcd` 这样的尾号提示，不会再返回页面。费用计入该 key。
@@ -42,7 +44,14 @@
 - Undo 检查文件仍处于刚应用后的版本；后续手动编辑、任务重新绑定工程都会阻止不安全撤销。已完成轮次不能重新 Apply。新轮次需新诊断。
 - Ask BIT 按任务保存会话。聊天只解释、不写文件；需要修改时走诊断和 Review。开启“使用历史”（默认）时，聊天里说过的内容也会带进下一次诊断，不用再重复。关闭“使用历史”会排除先前轮次和聊天上下文，使用新的 Codex thread 或 Claude Code 会话，避免旧内容暗中进入请求。
 
-机械臂动画只展示流程，不执行修改后的代码。第一版没有 shell、编译、烧录、串口控制或物理测试；反馈由使用者根据实际观察填写，界面不会把动画播放当作验证通过。
+机械臂动画只展示流程，不执行修改后的代码。服务不提供 shell，诊断和 Review 也从不编译。唯一碰硬件的是 **Arm 面板**：任务的控制器是 Arduino 开发板、并且已经链接草图文件夹时，页头 Ask BIT 旁边会出现 Arm 按钮。
+
+- **Upload to arm** 先弹出确认（上传后板子重启，机械臂会动），再用 `arduino-cli compile --upload` 编译并上传链接的那个文件夹。文件夹里必须有与文件夹同名的 `.ino`。上传期间串口连接先断开，上传成功后自动重新连上。
+- **Connect** 打开串口：Windows 上用 PowerShell 调 .NET `SerialPort`，打开前就把 DTR、RTS 设为低，所以不会让 Uno 复位；其他系统退回 `arduino-cli monitor -c dtr=off`，部分板子仍可能复位。串口被 Arduino IDE 的串口监视器占用时会说明原因。
+- **Stop · x / Run again · g / Status · s** 只是向草图发送一行文字，含义由草图决定；随附的机械臂草图里 `x` 立即松开所有舵机。只允许 1 到 80 个可打印 ASCII 字符。
+- 日志在内存里保留最近 400 行，服务重启后清空。上传与 AI 任务互不阻塞。
+
+反馈仍由使用者根据实际观察填写，界面不会把动画播放或上传成功当作验证通过。
 
 ## 旧数据、取消与恢复
 
@@ -79,6 +88,13 @@
 | `POST /api/jobs/:id/cancel` | 中断真实任务；最终状态以 job 终态为准 |
 | `POST /api/agent/apply` | `{taskId,roundId,suggestionId,idempotencyKey}` → 操作 ID、变更文件、权威工作区 |
 | `POST /api/operations/:id/undo` | `{idempotencyKey}` → 撤销结果和权威工作区 |
+| `GET /api/arduino/status` | `{available,reason?,cli?,port?,fqbn,state,upload?,lines}`；`state` 为 `idle`/`uploading`/`monitoring` |
+| `POST /api/arduino/upload` | `{taskId}` → 202 状态；只编译该任务链接的文件夹，控制器须是 Arduino；已有上传时 409 |
+| `POST /api/arduino/upload/cancel` | 结束上传进程 |
+| `POST /api/arduino/serial/open` | 打开串口（不复位板子）；串口被占用时 409 并说明原因 |
+| `POST /api/arduino/serial/close` | 关闭串口 |
+| `POST /api/arduino/serial/send` | `{text}`，1 到 80 个可打印 ASCII 字符，作为一行发给草图 |
+| `GET /api/arduino/events` | SSE：首条 `event: status` 含最近的日志，之后 `event: line` 逐行、`event: status` 报告状态变化；不会自行结束 |
 
 错误统一为 `{error:{code,message}}`。诊断结果区分 `proposal` 和 `needs_information`；提案中 `changes[]` 的前置哈希和原文由后端生成，模型只能给选定现有路径的完整修改后文本（模型多写的 `files/`、`./` 前缀或反斜杠只在已选文件列表里查找，可能指向两个已选文件时拒绝；未修改的文件会被丢弃）。尊重模型自己的判断：`needs_information` 必须带问题，附带的修改被丢弃；`proposal` 至少要有一个真正的修改，附带的问题作为测试时的注意事项显示。提案带 `checks[]`，记录每个文件的自动检查结果（`passed`/`failed`/`skipped`）。Apply 不接受客户端传入的任意补丁，也不会再次调用模型生成。
 
