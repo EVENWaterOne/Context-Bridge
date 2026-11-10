@@ -58,3 +58,30 @@
 .motion-footer>div{flex-wrap:wrap;justify-content:flex-end}
 @media(max-width:760px){.motion-footer>div{width:100%}.motion-footer>div>.button:last-child{flex-basis:100%}}
 :root .motion-step{display:grid;grid-template-columns:24px 1fr auto;align-items:center;gap:14px;background:var(--surface);border-radius:12px;padding:17px 20px;min-height:66px}.motion-step .mono{margin:0;font-size:10px}.motion-step strong{font-size:13px;font-weight:500}.motion-examples{margin:22px 0 10px;display:grid;gap:8px}.motion-examples .eyebrow{margin:0 0 3px}.motion-examples>button{padding:14px 15px;text-align:left;border:1px solid #d5d9cf;border-radius:12px;background:#f9faf5;display:grid;gap:6px}.motion-examples strong{font-size:13px;font-weight:500}.motion-examples button>span{font-size:10px;line-height:1.5;color:var(--muted)}.motion-examples>button:hover{background:#f5df70;border-color:#cbb03b}.comparison-caption{display:flex;gap:18px;align-items:center;justify-content:space-between}.comparison-caption>span{font-size:10px;line-height:1.6;color:var(--muted);text-align:right}.parameter-card--easing .parameter-values{font-size:clamp(22px,2.2vw,32px);align-items:center;gap:12px}.test-command--easing{font-size:25px}.request-brief{padding:20px 24px;margin-bottom:26px;border-radius:14px;background:#f4f5ef}.request-brief .eyebrow{margin-bottom:10px}.request-brief h3{font-size:22px;line-height:1.4;margin:0 0 10px}.request-brief p{margin:4px 0;font-size:13px;color:var(--muted)}.request-file-list{display:grid;grid-template-columns:1fr 1fr;gap:9px}.request-file-list button{display:flex;gap:12px;align-items:center;padding:14px;text-align:left;background:white;border:1px solid var(--line);border-radius:10px;font-size:12px}.request-file-list button>span:last-child{margin-left:auto}.request-payload{margin-top:24px;font-size:12px}.request-payload summary{cursor:pointer}.request-payload pre{max-height:320px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#eef0e8;padding:18px;border-radius:12px;font-size:11px;line-height:1.5}@media(max-width:700px){.request-file-list{grid-template-columns:1fr}.comparison-caption{align-items:flex-start}.comparison-caption>span{max-width:180px}.parameter-card--easing .parameter-values{font-size:24px}.motion-step{padding:14px 16px!important;min-height:58px!important}.comparison-toggle>button{font-size:10px;padding:10px 12px}.test-command--easing{font-size:22px}}
+.arm-button{display:inline-flex;align-items:center;gap:8px}
+.arm-button .status-dot:not(.ok):not(.working),.arm-panel .chat-heading .status-dot:not(.ok):not(.working){background:#a3a99d;box-shadow:none;animation:none}
+.arm-button .status-dot.ok,.arm-panel .chat-heading .status-dot.ok{background:#4f9a3c;box-shadow:0 0 0 3px #4f9a3c26}
+.arm-button .status-dot.working,.arm-panel .chat-heading .status-dot.working{background:#9968f6;animation:agent-pulse 1.2s ease-in-out infinite}
+.arm-panel{width:min(430px,calc(100vw - 32px))}
+.arm-panel .chat-heading>div{flex-wrap:wrap;row-gap:4px}
+.arm-meta{flex-basis:100%;color:var(--muted);font-size:11px}
+.arm-summary{margin:0 0 12px;font-size:13px}
+.arm-error{margin:0 0 12px;padding:10px 12px;border-radius:12px;background:#fbe9e3;color:#8a2f14;font-size:12px}
+.arm-actions,.arm-commands{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.arm-commands .button{padding:9px 14px;font-size:13px}
+.arm-stop{background:#c4532f;border-color:#c4532f;color:#fff;font-weight:600}
+.arm-stop:disabled{background:#e7cfc6;border-color:#e7cfc6;color:#fff}
+.arm-log{min-height:140px;max-height:min(320px,38dvh);overflow:auto;overscroll-behavior:contain;padding:10px 12px;border-radius:12px;background:#1f231f;color:#e8ebe4;font:11px/1.55 "IBM Plex Mono",ui-monospace,monospace}
+.arm-log .fine{color:#a3a99d;margin:0}
+.arm-line{white-space:pre-wrap;word-break:break-word}
+.arm-line.upload{color:#b9c0b2}
+.arm-line.sent{color:#f3d548}
+.arm-line.info{color:#68ebdd}
+.arm-line.error{color:#ff8a72}
+.arm-panel{overflow:auto}
+.arm-panel .arm-log{flex:1 1 auto;min-height:80px}
+.arm-panel .arm-note{font-size:11px;line-height:1.45;color:var(--muted);margin:12px 0 0}
+.arm-summary small{color:var(--muted);font-size:12px}
+.arm-divider{width:1px;align-self:stretch;background:var(--line);margin:0 4px}
+.header-stop{padding:8px 14px;font-size:13px}
+@media (max-height:640px){.arm-panel .arm-log{min-height:60px;max-height:28dvh}}

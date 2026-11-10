@@ -21,6 +21,19 @@ On Windows, file-system tests require ordinary host permissions for atomic repla
 
 The pinned Node 24.14 runtime emits an experimental warning for its built-in SQLite module. The production build also reports the pre-existing large Three.js scene chunk. Neither warning is a failed check. The dependency installation's final audit reports zero vulnerabilities.
 
+## Arm panel: upload and serial — 2026-11-10
+
+| Boundary | Result | Evidence |
+| --- | --- | --- |
+| Frontend/backend compile | Passed | `npm run build` |
+| Automated tests | Passed | `npm test`: 204 passed. `tests/arduino.test.ts` (23 tests) drives the service with fake arduino-cli and serial-bridge processes: compile then upload arguments, Stop available while compiling, `x` sent before flashing, upload then reconnect, failed compile leaves the board alone, concurrent connects share one bridge, a connection closed while starting, busy port, open timeout, bridge failing later, sending to a dead bridge, shutdown during an upload, port detection, route checks (non-Arduino task, folder without a matching `.ino`, no session), SSE start and shutdown, GBK system messages. An adversarial review (3 lenses, each finding re-checked) found 15 real issues; all were fixed before the second hardware round |
+| Real arduino-cli compile | Passed without a board | Browser → Upload with `BRIDGE_ARDUINO_PORT=COM99`: the linked sketch compiled, avrdude then failed on the missing port and the panel reported it |
+| Real serial bridge | Passed without a board | Connect on COM99 reported the Windows reason (the port does not exist) |
+| Physical board: connect | Passed, owner watching | Arduino Uno on COM14 (found by `board list`) running the arm demo sketch, Windows. Connect at 17:44: the owner saw no movement, so opening the port did not reset the board; with live reads, no READY line followed and `s` got its STATUS line back at once |
+| Physical board: upload, stop, run | Passed, owner watching | Upload from the panel compiled and flashed the linked sketch (7714 bytes), the connection reopened by itself and showed STEP 1–8 live; Stop sent `x` and the sketch answered RELEASED / ABORTED within 50 ms; `g` then ran all 20 steps to DONE. The owner confirmed on the arm: it ran, stopped at once and went limp on Stop, and ran a full pass on `g` |
+| Physical board: reviewed upload flow | Passed, owner watching | After the review fixes (17:56): the connection stayed open while compiling, `x` went out before flashing (the sketch answered RELEASED), the upload finished and the connection reopened 3.7 s later, the arm ran, and the header Stop button sent `x` at STEP 8 with RELEASED / ABORTED in the same instant. The owner confirmed it on the arm. A restart of the service while connected (process killed) did not reset the board |
+| Known artefact | Harmless for this sketch | When the port opens, the Uno receives a few garbage bytes (the sketch prints `UNKNOWN ����` and ignores them). It happens before anything is sent and does not run a command. Boot text from the two resets avrdude causes during an upload arrives buffered right after the connection reopens |
+
 ## Claude Code provider — 2026-10-29
 
 | Boundary | Result | Evidence |

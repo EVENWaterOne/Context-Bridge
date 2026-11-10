@@ -88,3 +88,24 @@ export interface CodexStatus {
 export interface ServiceStatus { mode: 'local'; version: string; provider: ProviderId; providers: ProviderId[]; agent: CodexStatus }
 export interface ApplyResponse extends WorkspaceEnvelope { operationId: string; changedFiles: string[] }
 export interface ProjectScan { rootId: string; rootPath: string; files: { path: string; size: number }[]; skipped: string[] }
+
+/** Arduino upload and serial connection (server/arduino.ts). */
+export type ArduinoLineSource = 'upload' | 'serial' | 'sent' | 'info' | 'error';
+export interface ArduinoLine { seq: number; at: string; source: ArduinoLineSource; text: string }
+export interface ArduinoUpload { taskId: string; sketch: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled'; phase?: 'compiling' | 'uploading'; startedAt: string; finishedAt?: string }
+export interface ArduinoStatus {
+  available: boolean;
+  reason?: string;
+  cli?: string;
+  port?: string;
+  fqbn: string;
+  /** Changes when the service restarts; line sequence numbers start again then. */
+  instance: string;
+  /** uploading wins over the serial state; the serial field below says whether Stop can reach the board. */
+  state: 'idle' | 'connecting' | 'uploading' | 'monitoring';
+  serial: 'closed' | 'connecting' | 'open';
+  upload?: ArduinoUpload;
+  /** The most recent lines; the events stream only sends them in its first status event. */
+  lines: ArduinoLine[];
+}
+export type ArduinoEvent = { type: 'line'; line: ArduinoLine } | { type: 'status'; status: ArduinoStatus };
